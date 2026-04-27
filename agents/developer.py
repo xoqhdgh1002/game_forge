@@ -107,6 +107,55 @@ RULE-DEV-11: NaN, undefined, null로 인한 오류를 방지하기 위해
 RULE-DEV-12: 파티클 이펙트나 애니메이션이 있는 경우, 매 프레임 life 값을 감소시키고
              life <= 0인 파티클은 즉시 배열에서 제거하여 메모리 누수를 방지한다.
 
+RULE-DEV-13: 캐릭터·오브젝트는 반드시 SPRITES 데이터 테이블로 정의한다.
+             픽셀 문자열 배열(각 문자 = 1픽셀, 'X'=채움 '.'=투명)로 프레임을 표현한다.
+             모든 프레임은 같은 크기여야 하며, 최소 PIXEL_SIZE=3 이상으로 확대하여 렌더링한다.
+             ```javascript
+             const PIXEL_SIZE = 4; // 1픽셀 → 화면 4px
+             const SPRITES = {{
+               player: {{
+                 idle:   {{ frames: [["..X..", ".XXX.", "..X.."], ["..X..", "XXXXX", "..X.."]], fps: 4 }},
+                 walk:   {{ frames: [["..X..", "XXXXX", ".X.X."], ["..X..", "XXXXX", "X...X"]], fps: 8 }},
+                 jump:   {{ frames: [["XXXXX", ".XXX.", "X...X"]], fps: 12 }},
+               }},
+             }};
+             function drawSprite(ctx, frames, frameIdx, x, y, color) {{
+               const frame = frames[Math.floor(frameIdx) % frames.length];
+               const h = frame.length, w = frame[0].length;
+               frame.forEach((row, r) => {{
+                 [...row].forEach((ch, c) => {{
+                   if (ch !== '.') {{
+                     ctx.fillStyle = color;
+                     ctx.fillRect(x + c * PIXEL_SIZE, y + r * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
+                   }}
+                 }});
+               }});
+             }}
+             ```
+
+RULE-DEV-14: 모든 캐릭터 동작은 키포즈 과장 원칙을 따른다.
+             - walk: 다리 위치 차이를 과장 (F1↔F2 픽셀 위치 최대한 다르게)
+             - jump: 3프레임 필수 — [웅크림(몸 낮춤), 상승(팔다리 펼침), 착지(웅크림)]
+             - attack: 3프레임 필수 — [준비(뒤로 당김), 임팩트(최대 뻗음), 복귀]
+             - idle: 2프레임 필수 — 1px 상하 이동으로 숨쉬기 표현 (fps: 3~4)
+             프레임 수가 적어도 포즈 차이가 크면 살아있어 보인다.
+             프레임 수를 늘리는 것보다 각 프레임의 포즈 차이를 크게 만드는 것이 우선이다.
+
+RULE-DEV-15: 스쿼시 & 스트레치로 생동감을 추가한다.
+             - 점프 직전(웅크림): scaleY = 0.8 (납작하게)
+             - 점프 상승: scaleY = 1.2 (길게)
+             - 착지: scaleY = 0.7 → 빠르게 1.0 복귀 (0.1초)
+             ctx.save() / ctx.scale() / ctx.restore() 패턴으로 구현한다:
+             ```javascript
+             ctx.save();
+             ctx.translate(x + w/2, y + h/2);
+             ctx.scale(scaleX, scaleY);
+             ctx.translate(-(x + w/2), -(y + h/2));
+             drawSprite(ctx, frames, frameIdx, x, y, color);
+             ctx.restore();
+             ```
+             공격 임팩트, 피격 시에도 scaleX/scaleY 0.1초 진동 효과를 적용한다.
+
 ─────────────────────────────────────────
 ■ 코드 구조 표준
 ─────────────────────────────────────────
@@ -132,6 +181,10 @@ RULE-DEV-12: 파티클 이펙트나 애니메이션이 있는 경우, 매 프레
 <script>
   // ═══════════════════════════════
   // SECTION: 상수 선언
+  // ═══════════════════════════════
+
+  // ═══════════════════════════════
+  // SECTION: 스프라이트 데이터 (SPRITES + drawSprite)
   // ═══════════════════════════════
 
   // ═══════════════════════════════

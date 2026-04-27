@@ -1,31 +1,35 @@
 """
-Orchestrator Agent — 게임 개발 팀 총지휘관 v3
+Orchestrator v4 — Python 직접 파이프라인 제어
 
-역할: forge.py / bot.py로부터 작업 지시를 받아
-      Producer → Designer → [Sound + Asset(병렬)] → Developer → QA 루프를
-      Claude 에이전트가 상황에 따라 판단하며 지휘한다.
+LLM이 bash 명령 순서를 판단하던 방식을 제거하고,
+Python subprocess 로 각 에이전트 CLI를 직접 호출한다.
 
-v3 개선사항:
-  - Phase 2 구조 수정: Designer 완료 후 Sound + Asset 병렬 실행
-    (Sound Agent가 design.md를 필요로 하므로 Designer보다 먼저 실행 불가)
-  - 파이프라인 상태 저장 (pipeline_state.json) — 강제 종료 후 복구 가능
-  - 텔레그램 실시간 진행 알림 (notify.py)
-  - Developer가 sounds.json을 읽어 사운드 통합
+파이프라인:
+  Producer → Designer → [Sound + Asset(병렬)] → Developer → QA → BrowserQA
 """
 import asyncio
 import json
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from claude_agent_sdk import query as agent_query, ClaudeAgentOptions, ResultMessage
 
 PYTHON     = str(Path(sys.executable))
-AGENTS_DIR = str(Path(__file__).parent / "agents")
+AGENTS_DIR = Path(__file__).parent / "agents"
 
 
-# ── 파이프라인 상태 관리 ─────────────────────────────────────────────────────
+# ── 유틸 ──────────────────────────────────────────────────────────────────────
+
+def _ts() -> str:
+    return datetime.now().strftime("[%H:%M:%S]")
+
+
+def _log(msg: str):
+    print(f"{_ts()} {msg}", flush=True)
+
+
 def _save_state(output_dir: str, state: dict):
-    """파이프라인 현재 상태를 pipeline_state.json에 저장한다."""
     try:
         p = Path(output_dir) / "pipeline_state.json"
         state["updated_at"] = datetime.now().isoformat()
@@ -35,7 +39,6 @@ def _save_state(output_dir: str, state: dict):
 
 
 def load_state(output_dir: str) -> dict | None:
-    """저장된 파이프라인 상태를 읽는다. 없으면 None."""
     try:
         p = Path(output_dir) / "pipeline_state.json"
         if p.exists():
@@ -44,201 +47,139 @@ def load_state(output_dir: str) -> dict | None:
         pass
     return None
 
-SYSTEM = f"""당신은 HTML5 게임 개발 팀의 수석 오케스트레이터다.
-주어진 작업 디렉토리 안에서 각 에이전트 CLI를 Bash로 호출하여 게임을 완성하는 것이
-당신의 유일한 임무다.
 
-─────────────────────────────────────────
-■ 사용 가능한 에이전트 CLI 명령어
-─────────────────────────────────────────
-Python 인터프리터: {PYTHON}
-에이전트 디렉토리: {AGENTS_DIR}
-
-1. Producer — GDD 초안 생성
-   명령어: {PYTHON} {AGENTS_DIR}/run_producer.py "<idea>" "<style>" "<engine>" "<output_dir>"
-   출력: <output_dir>/gdd.md
-   성공: "OK:" 로 시작하는 stdout, exit 0
-
-2. Designer — 세부 기술 설계
-   명령어: {PYTHON} {AGENTS_DIR}/run_designer.py "<output_dir>"
-   입력: <output_dir>/gdd.md
-   출력: <output_dir>/design.md
-   성공: "OK:" 로 시작하는 stdout, exit 0
-
-3. Sound Agent — Web Audio API 사운드 코드 생성 (항상 실행)
-   명령어: {PYTHON} {AGENTS_DIR}/run_sound_agent.py "<output_dir>"
-   입력: <output_dir>/gdd.md + design.md
-   출력: <output_dir>/sounds.json
-   성공: "OK:" 또는 "FALLBACK:" (실패 시 기본 비프음 사용), 항상 exit 0
-
-4. Asset Collector — itch.io 에셋 수집 (use_assets=Yes 인 경우만)
-   명령어: {PYTHON} {AGENTS_DIR}/run_asset_collector.py "<output_dir>" "<itchio_url>"
-   입력: <output_dir>/design.md
-   출력: <output_dir>/assets.json
-   성공: "OK:" 또는 "FALLBACK:", 항상 exit 0
-
-5. Developer — 게임 코드 작성
-   명령어: {PYTHON} {AGENTS_DIR}/run_developer.py "<output_dir>" "<engine>"
-   입력: <output_dir>/gdd.md + design.md + sounds.json (+ assets.json)
-   출력: <output_dir>/game.html
-   성공: "OK:" 로 시작하는 stdout, exit 0
-
-6. QA — 코드 검토 및 수정
-   명령어: {PYTHON} {AGENTS_DIR}/run_qa.py "<output_dir>"
-   입력: <output_dir>/game.html
-   출력: <output_dir>/game.html (수정됨) + qa_report.md
-   exit 0: QA 통과 (크리티컬 버그 없음)
-   exit 2: 크리티컬 버그 발견 → Developer 재실행 필요
-
-7. 진행 알림 — 텔레그램으로 상태 메시지 전송 (선택)
-   명령어: {PYTHON} {AGENTS_DIR}/notify.py "<output_dir>" "<message>"
-   실패해도 파이프라인을 멈추지 않는다. 항상 exit 0.
-
-─────────────────────────────────────────
-■ 실행 순서 (3단계 파이프라인)
-─────────────────────────────────────────
-
-【Phase 1 — 기획】 (순차)
-  Producer → gdd.md 생성
-
-  알림: notify.py "✅ 기획 완료! 설계·사운드·에셋 준비 중..."
-
-【Phase 2a — 설계】 (순차)
-  Designer → design.md 생성
-  ⚠️ Sound Agent는 design.md가 반드시 필요하므로 Designer 완료 전 실행 불가.
-
-  알림: notify.py "🎨 기술 설계 완료! 사운드·에셋 준비 중..."
-
-【Phase 2b — 병렬 준비】 (Sound + Asset 동시 실행, Designer 완료 후)
-  Designer가 완료되어 design.md가 생성된 뒤 Sound와 Asset을 병렬 실행한다.
-
-  bash 예시:
-  ```
-  PYTHON="{PYTHON}"
-  AGENTS="{AGENTS_DIR}"
-  OUT="<output_dir>"
-
-  # Sound Agent — design.md 완료 후 실행
-  "$PYTHON" "$AGENTS/run_sound_agent.py" "$OUT" > "$OUT/sound.log" 2>&1 &
-  SOUND_PID=$!
-
-  # Asset Collector (use_assets=Yes일 때만)
-  if [ use_assets = Yes ]; then
-    "$PYTHON" "$AGENTS/run_asset_collector.py" "$OUT" "<itchio_url>" > "$OUT/asset.log" 2>&1 &
-    ASSET_PID=$!
-    wait $SOUND_PID $ASSET_PID
-  else
-    wait $SOUND_PID
-  fi
-  ```
-
-  각 결과 확인:
-  - cat sound.log    → "OK:" 또는 "FALLBACK:"
-  - cat asset.log    → "OK:" 또는 "FALLBACK:" (use_assets일 때)
-
-  알림: notify.py "🔊 사운드·에셋 준비 완료! 코드 작성 시작..."
-
-【Phase 3 — 개발 + QA 루프】 (순차, 최대 max_retries 회)
-  Developer → QA
-    QA exit 0 → 완료
-    QA exit 2 → Developer 재실행 (qa_report.md 참고) → QA 재실행
-  max_retries 초과 시 현재 game.html 그대로 사용
-
-  알림(각 반복 시작): notify.py "⚙️ 코드 작성 중... (시도 N/max_retries)"
-  알림(QA 통과):     notify.py "🔍 QA 통과! 마무리 중..."
-  알림(QA 실패 재시도): notify.py "🔧 버그 수정 중... (N회 남음)"
-
-─────────────────────────────────────────
-■ 실패 처리
-─────────────────────────────────────────
-- Producer 실패 (exit 1): 1회 재시도 후 중단
-- Designer 실패 (exit 1): 1회 재시도 후 Sound/Asset만으로 진행
-- Sound Agent 실패: FALLBACK 확인 후 계속 진행 (사운드 없어도 게임은 완성)
-- Asset Collector 실패: FALLBACK 확인 후 계속 진행 (Canvas 도형 사용)
-- Developer 실패 (exit 1): 1회 재시도 후 QA 건너뛰고 완료
-- QA 실패 (exit 1, not exit 2): QA 건너뛰고 game.html 그대로 완료
-
-─────────────────────────────────────────
-■ Developer에게 sounds.json 전달 방법
-─────────────────────────────────────────
-Developer(run_developer.py)는 자동으로 sounds.json을 읽는다.
-오케스트레이터가 직접 sounds.json 내용을 Developer에게 전달할 필요 없다.
-단, Developer 실행 전 sounds.json이 <output_dir>에 존재해야 한다.
-
-─────────────────────────────────────────
-■ 절대 지켜야 할 규칙
-─────────────────────────────────────────
-RULE-ORC-01: 각 에이전트 CLI 실행 전 "▶ [에이전트명] 시작..." 을 출력한다.
-RULE-ORC-02: 각 에이전트 CLI 실행 후 exit code와 stdout/stderr를 확인한다.
-RULE-ORC-03: Phase 2는 반드시 병렬(&)로 실행하여 전체 시간을 단축한다.
-RULE-ORC-04: 각 Phase 시작/완료 시 notify.py로 텔레그램 알림을 보낸다.
-RULE-ORC-05: 최종적으로 game.html이 존재하면 "✅ 오케스트레이션 완료: <경로>" 를 출력한다.
-RULE-ORC-06: game.html이 끝내 생성되지 않으면 "❌ 오케스트레이션 실패" 를 출력하고 exit 1한다.
-RULE-ORC-07: 모든 로그는 타임스탬프 [HH:MM:SS] 형식을 앞에 붙인다.
-RULE-ORC-08: Sound Agent는 use_assets 여부와 무관하게 항상 실행한다.
-"""
-
-PROMPT_TEMPLATE = """─────────────────────────────────────────
-오케스트레이션 작업 명세
-─────────────────────────────────────────
-아이디어: {idea}
-스타일:   {style}
-엔진:     {engine}
-출력 디렉토리: {output_dir}
-에셋 수집 여부: {use_assets}
-itch.io URL: {itchio_url}
-QA 건너뜀: {skip_qa}
-최대 재시도 횟수: {max_retries}
-─────────────────────────────────────────
-
-위 명세대로 파이프라인을 실행하라.
-⚠️ 중요: Phase 2b(Sound + Asset)는 Phase 2a(Designer) 완료 후에만 실행한다.
-         Sound Agent가 design.md를 필요로 하기 때문이다.
-각 Phase 전후로 notify.py를 호출해 텔레그램에 진행 상황을 알린다.
-모든 에이전트 CLI는 Bash 도구로 실행한다.
-
-각 Phase 완료 시 아래 형식으로 pipeline_state.json을 Write 도구로 저장하라:
-Phase 1 완료: {{"stage":"designer","idea":"{idea}","style":"{style}","engine":"{engine}"}}
-Phase 2a 완료: {{"stage":"sound_asset","idea":"{idea}","style":"{style}","engine":"{engine}"}}
-Phase 2b 완료: {{"stage":"developer","idea":"{idea}","style":"{style}","engine":"{engine}"}}
-Phase 3 완료: {{"stage":"done","idea":"{idea}","style":"{style}","engine":"{engine}"}}
-"""
+def _run(cmd: list[str], label: str, output_dir: str) -> tuple[int, str]:
+    """subprocess 실행 후 (returncode, stdout+stderr) 반환."""
+    _log(f"▶ [{label}] 시작...")
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=output_dir,
+            timeout=600,
+        )
+        out = (r.stdout + r.stderr).strip()
+        if r.returncode == 0:
+            _log(f"✅ [{label}] 완료")
+        else:
+            _log(f"❌ [{label}] 실패 (exit {r.returncode}): {out[:200]}")
+        return r.returncode, out
+    except subprocess.TimeoutExpired:
+        _log(f"⏰ [{label}] 타임아웃 (600s)")
+        return 1, "timeout"
+    except Exception as e:
+        _log(f"💥 [{label}] 예외: {e}")
+        return 1, str(e)
 
 
-async def run(
-    idea: str,
-    style: str,
-    engine: str,
+def _notify(output_dir: str, msg: str):
+    """텔레그램 알림 — 실패해도 파이프라인 중단 없음."""
+    try:
+        subprocess.run(
+            [PYTHON, str(AGENTS_DIR / "notify.py"), output_dir, msg],
+            timeout=10, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
+# ── 파이프라인 단계 ───────────────────────────────────────────────────────────
+
+def _phase1_producer(idea: str, style: str, engine: str, output_dir: str) -> bool:
+    cmd = [PYTHON, str(AGENTS_DIR / "run_producer.py"), idea, style, engine, output_dir]
+    code, _ = _run(cmd, "Producer", output_dir)
+    if code != 0:
+        _log("↩ Producer 재시도...")
+        code, _ = _run(cmd, "Producer(retry)", output_dir)
+    return code == 0
+
+
+def _phase2a_designer(output_dir: str) -> bool:
+    cmd = [PYTHON, str(AGENTS_DIR / "run_designer.py"), output_dir]
+    code, _ = _run(cmd, "Designer", output_dir)
+    if code != 0:
+        _log("↩ Designer 재시도...")
+        code, _ = _run(cmd, "Designer(retry)", output_dir)
+    return code == 0
+
+
+def _phase2b_parallel(output_dir: str, use_assets: bool, itchio_url: str):
+    """Sound + Asset 병렬 실행 (ThreadPoolExecutor)."""
+    def run_sound():
+        return _run(
+            [PYTHON, str(AGENTS_DIR / "run_sound_agent.py"), output_dir],
+            "Sound", output_dir,
+        )
+
+    def run_asset():
+        return _run(
+            [PYTHON, str(AGENTS_DIR / "run_asset_collector.py"), output_dir, itchio_url],
+            "Asset", output_dir,
+        )
+
+    tasks = [run_sound]
+    if use_assets:
+        tasks.append(run_asset)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        list(ex.map(lambda f: f(), tasks))
+
+
+def _phase3_dev_qa(
     output_dir: str,
-    use_assets: bool,
-    itchio_url: str,
+    engine: str,
     skip_qa: bool,
     max_retries: int,
-) -> str:
-    prompt = PROMPT_TEMPLATE.format(
-        idea=idea,
-        style=style,
-        engine=engine,
-        output_dir=output_dir,
-        use_assets="Yes" if use_assets else "No",
-        itchio_url=itchio_url,
-        skip_qa="Yes" if skip_qa else "No",
-        max_retries=max_retries,
-    )
-    result_text = ""
-    async for msg in agent_query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            allowed_tools=["Bash", "Write", "Read"],
-            disallowed_tools=["computer"],
-            system_prompt=SYSTEM,
-            cwd=output_dir,
-        ),
-    ):
-        if isinstance(msg, ResultMessage):
-            result_text = (msg.result or "").strip()
-    return result_text
+) -> bool:
+    """Developer → QA 루프. True=game.html 존재."""
+    for attempt in range(1, max_retries + 1):
+        _notify(output_dir, f"⚙️ 코드 작성 중... ({attempt}/{max_retries})")
+        dev_cmd = [PYTHON, str(AGENTS_DIR / "run_developer.py"), output_dir, engine]
+        code, _ = _run(dev_cmd, f"Developer({attempt})", output_dir)
+        if code != 0:
+            if attempt < max_retries:
+                continue
+            _log("Developer 최종 실패 — game.html 없이 종료")
+            return False
 
+        if skip_qa:
+            _log("⏭ QA 건너뜀")
+            return True
+
+        qa_cmd = [PYTHON, str(AGENTS_DIR / "run_qa.py"), output_dir]
+        qa_code, _ = _run(qa_cmd, f"QA({attempt})", output_dir)
+
+        if qa_code == 0:
+            _notify(output_dir, "🔍 QA 통과! 브라우저 검증 중...")
+            return True
+        elif qa_code == 2:
+            remaining = max_retries - attempt
+            if remaining > 0:
+                _notify(output_dir, f"🔧 버그 수정 중... ({remaining}회 남음)")
+            # 다음 iteration에서 Developer 재실행
+        else:
+            # QA 자체 오류 — game.html은 있으므로 그냥 통과
+            _log("QA 오류 (exit 1) — game.html 그대로 사용")
+            return True
+
+    _log("max_retries 초과 — 현재 game.html 그대로 사용")
+    return (Path(output_dir) / "game.html").exists()
+
+
+def _phase4_browser_qa(output_dir: str) -> dict:
+    """Playwright 헤드리스 브라우저로 실제 실행 검증."""
+    browser_qa = AGENTS_DIR / "browser_qa.py"
+    if not browser_qa.exists():
+        return {"skipped": True}
+    code, out = _run(
+        [PYTHON, str(browser_qa), output_dir],
+        "BrowserQA", output_dir,
+    )
+    return {"passed": code == 0, "output": out}
+
+
+# ── 공개 인터페이스 ───────────────────────────────────────────────────────────
 
 def orchestrate(
     idea: str,
@@ -251,39 +192,56 @@ def orchestrate(
     max_retries: int = 2,
 ) -> bool:
     """
-    오케스트레이션을 실행한다.
-    Returns: True(성공) / False(실패)
+    게임 파이프라인을 Python이 직접 제어하여 실행한다.
+    Returns: True(game.html 생성 성공) / False(실패)
     """
-    # 파이프라인 시작 상태 저장
     _save_state(output_dir, {
-        "stage": "started",
-        "idea": idea,
-        "style": style,
-        "engine": engine,
-        "use_assets": use_assets,
-        "skip_qa": skip_qa,
-        "max_retries": max_retries,
-        "itchio_url": itchio_url,
+        "stage": "started", "idea": idea, "style": style, "engine": engine,
+        "use_assets": use_assets, "skip_qa": skip_qa, "max_retries": max_retries,
     })
 
-    result = asyncio.run(run(
-        idea=idea,
-        style=style,
-        engine=engine,
-        output_dir=output_dir,
-        use_assets=use_assets,
-        itchio_url=itchio_url,
-        skip_qa=skip_qa,
-        max_retries=max_retries,
-    ))
+    # Phase 1 — 기획
+    _notify(output_dir, "📝 기획 시작...")
+    if not _phase1_producer(idea, style, engine, output_dir):
+        _log("❌ 오케스트레이션 실패 — Producer 중단")
+        _save_state(output_dir, {"stage": "failed", "reason": "producer"})
+        return False
+    _save_state(output_dir, {"stage": "designer", "idea": idea})
+    _notify(output_dir, "✅ 기획 완료! 설계 중...")
+
+    # Phase 2a — 설계
+    _phase2a_designer(output_dir)   # 실패해도 진행 (GDD만으로도 개발 가능)
+    _save_state(output_dir, {"stage": "sound_asset", "idea": idea})
+    _notify(output_dir, "🎨 설계 완료! 사운드·에셋 준비 중...")
+
+    # Phase 2b — Sound + Asset 병렬
+    _phase2b_parallel(output_dir, use_assets, itchio_url)
+    _save_state(output_dir, {"stage": "developer", "idea": idea})
+    _notify(output_dir, "🔊 준비 완료! 코드 작성 시작...")
+
+    # Phase 3 — 개발 + QA 루프
+    success = _phase3_dev_qa(output_dir, engine, skip_qa, max_retries)
+
+    if not success:
+        _log("❌ 오케스트레이션 실패")
+        _save_state(output_dir, {"stage": "failed", "reason": "developer"})
+        return False
+
+    # Phase 4 — 브라우저 실행 검증
+    browser_result = _phase4_browser_qa(output_dir)
+    if not browser_result.get("skipped"):
+        if browser_result.get("passed"):
+            _notify(output_dir, "🌐 브라우저 검증 통과!")
+        else:
+            _notify(output_dir, "⚠️ 브라우저 검증 실패 — 게임은 생성됨")
+
     game_html = Path(output_dir) / "game.html"
-    success = game_html.exists() and game_html.stat().st_size > 500
+    final_success = game_html.exists() and game_html.stat().st_size > 500
+    _save_state(output_dir, {"stage": "done" if final_success else "failed", "idea": idea})
 
-    # 최종 상태 저장
-    _save_state(output_dir, {
-        "stage": "done" if success else "failed",
-        "idea": idea,
-        "style": style,
-        "engine": engine,
-    })
-    return success
+    if final_success:
+        _log(f"✅ 오케스트레이션 완료: {game_html}")
+    else:
+        _log("❌ 오케스트레이션 실패")
+
+    return final_success

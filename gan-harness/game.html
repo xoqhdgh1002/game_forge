@@ -1,0 +1,2407 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title>시기열전 — 사마천의 발자취</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Nanum+Brush+Script&family=Nanum+Gothic:wght@400;700&family=Noto+Serif+KR:wght@500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --parchment: #F4E8C8;
+    --parchment-dark: #E5D5A8;
+    --ink: #1F1A14;
+    --ink-soft: #4A3D2C;
+    --vermilion: #C8392E;
+    --jade: #3F8E6B;
+    --gold: #D4A437;
+    --twilight: #3B4F7A;
+    --plum: #7A2E4D;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #2a221a;
+    color: var(--ink);
+    font-family: 'Nanum Gothic', 'Noto Sans KR', sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(ellipse at center, #3a2e22 0%, #1a140e 100%);
+  }
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas#game {
+    background: var(--parchment);
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    box-shadow:
+      0 0 0 2px #1F1A14,
+      0 20px 60px rgba(0,0,0,0.6),
+      inset 0 0 80px rgba(60,40,20,0.15);
+    cursor: default;
+    max-width: 100vw;
+    max-height: 100vh;
+  }
+  /* Help banner — non-canvas, hides itself after first input */
+  #help {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #f4e8c8;
+    font-family: 'Nanum Gothic', sans-serif;
+    font-size: 12px;
+    letter-spacing: 1px;
+    opacity: 0.65;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    transition: opacity 0.6s;
+  }
+  #help.hidden { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="help">방향키 / WASD · 대화 Space · 죽간 Tab · 도감 G · 음소거 M</div>
+</div>
+
+<script>
+"use strict";
+
+// ============================================================
+// ===== CONFIG / PALETTE =====================================
+// ============================================================
+const W = 960, H = 540;
+const TILE = 32;          // logical tile size on screen
+const TILES_W = 30;       // map width in tiles  → 960
+const TILES_H = 17;       // map height in tiles → 544 (clipped to 540)
+const PIXEL = 2;          // sprite "pixel" size (sprites authored at TILE/PIXEL grid)
+
+const C = {
+  parchment:     "#F4E8C8",
+  parchmentDk:   "#E5D5A8",
+  parchmentDker: "#C8B786",
+  ink:           "#1F1A14",
+  inkSoft:       "#4A3D2C",
+  vermilion:     "#C8392E",
+  vermilionDk:   "#8E2820",
+  jade:          "#3F8E6B",
+  jadeDk:        "#2B6049",
+  gold:          "#D4A437",
+  twilight:      "#3B4F7A",
+  twilightDk:    "#26344F",
+  plum:          "#7A2E4D",
+  skin:          "#E2B58A",
+  skinDk:        "#9C7048",
+  brown:         "#5C3A1E",
+  white:         "#F6EFD8",
+  river:         "#5E7BA0",
+  riverDk:       "#3F557A",
+  grass:         "#7FA866",
+  grassDk:       "#557A44",
+  sand:          "#D9C387",
+  stone:         "#8E8270",
+  stoneDk:       "#5E5446",
+  banner:        "#C8392E",
+  bambooLight:   "#C7B26A",
+  bambooDark:    "#7A6730",
+};
+
+// ============================================================
+// ===== INPUT =================================================
+// ============================================================
+const keys = {};
+const keyOnce = {};            // single-frame "just pressed" flags
+const KEY_MAP = {
+  ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
+  KeyW:"up", KeyS:"down", KeyA:"left", KeyD:"right",
+  Space:"action", Enter:"action",
+  Tab:"inventory", KeyG:"glossary",
+  KeyM:"mute", Escape:"pause",
+  Digit1:"c1", Digit2:"c2", Digit3:"c3",
+};
+
+window.addEventListener("keydown", (e) => {
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+  // Don't block default for letters that aren't game keys.
+  e.preventDefault();
+  if (!keys[k]) keyOnce[k] = true;
+  keys[k] = true;
+  // Hide help overlay on first interaction
+  const help = document.getElementById("help");
+  if (help && !help.classList.contains("hidden")) help.classList.add("hidden");
+}, { passive: false });
+
+window.addEventListener("keyup", (e) => {
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+  e.preventDefault();
+  keys[k] = false;
+}, { passive: false });
+
+function consume(name) {
+  if (keyOnce[name]) { keyOnce[name] = false; return true; }
+  return false;
+}
+
+// ============================================================
+// ===== AUDIO (Web Audio API, procedural pentatonic) =========
+// ============================================================
+let audioCtx = null;
+let muted = false;
+try { muted = localStorage.getItem("sjyj_mute") === "1"; } catch(_) {}
+
+function ensureAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) { audioCtx = null; }
+}
+
+// Pentatonic frequencies (Korean 가야금 vibe)
+const PENTA = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+
+function pluck(freq = 440, dur = 0.35, vol = 0.18) {
+  if (muted || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = "triangle";
+  o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audioCtx.destination);
+  o.start(t);
+  o.stop(t + dur + 0.05);
+}
+
+function sfxStep()    { pluck(180 + Math.random()*40, 0.05, 0.05); }
+function sfxTalk()    { pluck(PENTA[2 + Math.floor(Math.random()*4)], 0.14, 0.10); }
+function sfxConfirm() { pluck(PENTA[5], 0.20, 0.14); pluck(PENTA[7], 0.30, 0.10); }
+function sfxCollect() { pluck(PENTA[4], 0.18, 0.16); setTimeout(()=>pluck(PENTA[6], 0.22, 0.14),80); setTimeout(()=>pluck(PENTA[7], 0.28, 0.12),180); }
+function sfxOpen()    { pluck(PENTA[3], 0.12, 0.10); }
+function sfxScene()   { pluck(PENTA[0], 0.5, 0.10); setTimeout(()=>pluck(PENTA[2], 0.5, 0.08), 120); setTimeout(()=>pluck(PENTA[4], 0.6, 0.07), 260); }
+
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem("sjyj_mute", muted ? "1" : "0"); } catch(_) {}
+}
+
+// ============================================================
+// ===== SPRITE DATA (drawn entirely via fillRect) ============
+// ============================================================
+// Sprites are arrays-of-strings where each char is a palette index.
+// '.' = transparent. Characters are 14×20 logical "pixels" → rendered as 2px blocks → 28×40 on screen
+function makeSprite(rows, palette) {
+  return { rows, palette, w: rows[0].length, h: rows.length };
+}
+
+function drawSprite(ctx, sprite, x, y, scale = PIXEL, flipX = false) {
+  const { rows, palette, w, h } = sprite;
+  for (let py = 0; py < h; py++) {
+    const row = rows[py];
+    for (let px = 0; px < w; px++) {
+      const ch = row[flipX ? (w - 1 - px) : px];
+      if (ch === "." || ch === " ") continue;
+      const color = palette[ch];
+      if (!color) continue;
+      ctx.fillStyle = color;
+      ctx.fillRect(x + px * scale, y + py * scale, scale, scale);
+    }
+  }
+}
+
+// --- Player (young scribe of 사마천) ---
+// Palette: H=hat(ink), F=face(skin), I=ink robe, S=sash(vermilion), B=brush brown, W=white scroll
+const playerPaletteBase = {
+  H: C.ink, F: C.skin, f: C.skinDk,
+  I: C.inkSoft, J: C.ink, S: C.vermilion,
+  B: C.brown, W: C.white, G: C.gold,
+};
+// 14 wide × 20 tall
+const PLAYER_DOWN_A = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...FFFFFFFF...",
+  "...FfFFFFfF...",
+  "...FFFFFFFF...",
+  "....FFFFFF....",
+  "...IIIIIIII...",
+  "..IIISSSSII...",
+  "..IIIWWWWII...",
+  "..IIIWWWWII...",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "...II....II...",
+  "...II....II...",
+  "...JJ....JJ...",
+  "...JJ....JJ...",
+], playerPaletteBase);
+
+const PLAYER_DOWN_B = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...FFFFFFFF...",
+  "...FfFFFFfF...",
+  "...FFFFFFFF...",
+  "....FFFFFF....",
+  "...IIIIIIII...",
+  "..IIISSSSII...",
+  "..IIIWWWWII...",
+  "..IIIWWWWII...",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "....II..II....",
+  "...II....II...",
+  "...JJ....JJ...",
+  "....JJ..JJ....",
+], playerPaletteBase);
+
+const PLAYER_UP_A = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...HHHHHHHH...",
+  "...HHHHHHHH...",
+  "...HHHHHHHH...",
+  "....HHHHHH....",
+  "...IIIIIIII...",
+  "..IIIIIIIII...",
+  "..IIIIIIIII...",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "...II....II...",
+  "...II....II...",
+  "...JJ....JJ...",
+  "...JJ....JJ...",
+], playerPaletteBase);
+const PLAYER_UP_B = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...HHHHHHHH...",
+  "...HHHHHHHH...",
+  "...HHHHHHHH...",
+  "....HHHHHH....",
+  "...IIIIIIII...",
+  "..IIIIIIIII...",
+  "..IIIIIIIII...",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "....II..II....",
+  "...II....II...",
+  "...JJ....JJ...",
+  "....JJ..JJ....",
+], playerPaletteBase);
+
+const PLAYER_SIDE_A = makeSprite([
+  ".....HHHHH....",
+  "....HHHHHHH...",
+  "...HHHHHHHHF..",
+  "....FFFFFFFF..",
+  "....FfFFFFFF..",
+  "....FFFFFFFF..",
+  ".....FFFFFF...",
+  "....IIIIIIII..",
+  "...IISSSSIII..",
+  "...IIWWWWIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "....IIIIIII...",
+  "....II..II....",
+  "....II..II....",
+  "....JJ..JJ....",
+  "....JJ..JJ....",
+], playerPaletteBase);
+
+const PLAYER_SIDE_B = makeSprite([
+  ".....HHHHH....",
+  "....HHHHHHH...",
+  "...HHHHHHHHF..",
+  "....FFFFFFFF..",
+  "....FfFFFFFF..",
+  "....FFFFFFFF..",
+  ".....FFFFFF...",
+  "....IIIIIIII..",
+  "...IISSSSIII..",
+  "...IIWWWWIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "...IIIIIIIII..",
+  "....IIIIIII...",
+  "....IIIIII....",
+  "...II..II.....",
+  "...JJ..JJ.....",
+  "..JJ....JJ....",
+], playerPaletteBase);
+
+// --- NPC builder helper: same body shape but distinct palettes ---
+function makeNPC(robeMain, robeAccent, hat) {
+  return {
+    H: hat, F: C.skin, f: C.skinDk,
+    I: robeMain, S: robeAccent, W: C.white, J: C.ink, G: C.gold,
+  };
+}
+
+// 형가 — twilight blue (assassin / scholar in dark robe, scholar braid)
+const NPC_HYEONGGA_PAL = { H: C.ink, F: C.skin, f: C.skinDk, I: C.twilight, S: C.gold, W: C.parchmentDker, J: C.ink, G: C.gold };
+// 항우 — vermilion warlord, helmet
+const NPC_HANGU_PAL    = { H: C.vermilionDk, F: C.skin, f: C.skinDk, I: C.vermilion, S: C.gold, W: C.ink, J: C.ink, G: C.gold };
+// 유방 — jade robe, gold sash (the king of Han)
+const NPC_YUBANG_PAL   = { H: C.jadeDk, F: C.skin, f: C.skinDk, I: C.jade, S: C.gold, W: C.parchmentDker, J: C.ink, G: C.gold };
+// 사마천 — plum scholar
+const NPC_SIMA_PAL     = { H: C.plum,    F: C.skin, f: C.skinDk, I: C.plum, S: C.gold, W: C.parchmentDker, J: C.ink, G: C.gold };
+
+// 형가 sprite — taller, has a sword on side (blue twilight)
+const NPC_HYEONGGA = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "..HFFFFFFFFH..",
+  "..HFfFFFFfFH..",
+  "..HFFFFFFFFH..",
+  "...FFFFFFFF...",
+  "..IIIIIIIIII..",
+  "..IIISSSSIII..",
+  "..IIWGGGGGWI..",
+  "..IIWWWWWWWI..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIIIH.",
+  "..IIIIIIIIIIH.",
+  "..IIIIIIIIII..",
+  "...II....II...",
+  "...II....II...",
+  "...JJ....JJ...",
+  "...JJ....JJ...",
+], NPC_HYEONGGA_PAL);
+
+// 항우 — broad shoulders, vermilion + helmet wings
+const NPC_HANGU = makeSprite([
+  "..GG......GG..",
+  "..GHHHHHHHHG..",
+  ".GHHHHHHHHHHG.",
+  "..HHHHHHHHHH..",
+  "..HFFFFFFFFH..",
+  "..HFfFFFFfFH..",
+  "...FFFFFFFF...",
+  ".IIIIIIIIIIII.",
+  ".IIIISSSSIIII.",
+  ".IIIIWWWWIIII.",
+  ".IIIIIGIIIIII.",
+  ".IIIIIGIIIIII.",
+  ".IIIIIIIIIIII.",
+  ".IIIIIIIIIIII.",
+  ".IIIIIIIIIIII.",
+  "..IIIIIIIIII..",
+  "..II......II..",
+  "..II......II..",
+  "..JJ......JJ..",
+  "..JJ......JJ..",
+], NPC_HANGU_PAL);
+
+// 유방 — slim, jade robe, top knot
+const NPC_YUBANG = makeSprite([
+  "......GG......",
+  ".....GGGG.....",
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...FFFFFFFF...",
+  "...FfFFFFfF...",
+  "...FFFFFFFF...",
+  "..IIIIIIIIII..",
+  "..IISSGGSSII..",
+  "..IIWWWWWWII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "...II....II...",
+  "...II....II...",
+  "...JJ....JJ...",
+  "...JJ....JJ...",
+], NPC_YUBANG_PAL);
+
+// 사마천 — scholar with scroll, plum robe
+const NPC_SIMA = makeSprite([
+  "....HHHHHH....",
+  "...HHHHHHHH...",
+  "..HHHHHHHHHH..",
+  "...FFFFFFFF...",
+  "...FfFFFFfF...",
+  "...FFFFFFFF...",
+  "....FFFFFF....",
+  "..IIIIIIIIII..",
+  "..IISSSSSSII..",
+  "..IIWWWWWWII.G",
+  "..IIIIIIIIIIG.",
+  "..IIIIIIIIIIG.",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "..IIIIIIIIII..",
+  "...II....II...",
+  "...II....II...",
+  "...JJ....JJ...",
+  "...JJ....JJ...",
+], NPC_SIMA_PAL);
+
+// "!" exclamation (drawn programmatically — not emoji)
+function drawExclaim(ctx, x, y, t) {
+  const bob = Math.sin(t * 0.008) * 2;
+  const px = PIXEL;
+  // Yellow bubble background
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(x - 6, y - 24 + bob, 12, 18);
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(x - 8, y - 24 + bob, 2, 18);
+  ctx.fillRect(x + 6, y - 24 + bob, 2, 18);
+  ctx.fillRect(x - 6, y - 26 + bob, 12, 2);
+  ctx.fillRect(x - 6, y - 6 + bob, 12, 2);
+  // The "!" mark
+  ctx.fillRect(x - 1, y - 22 + bob, 2, 10);
+  ctx.fillRect(x - 1, y - 10 + bob, 2, 2);
+}
+
+// ============================================================
+// ===== TILE MAPS =============================================
+// ============================================================
+// Tile glyphs:
+//   . = parchment floor (passable)
+//   , = textured grass / earth (passable)
+//   # = wall / cliff (block)
+//   ~ = water (block, animated)
+//   T = tree (block)
+//   B = bamboo grove (block)
+//   F = wooden floor (passable)
+//   = = path stones (passable)
+//   X = stone wall (block)
+//   o = pot / cauldron (block; collidable)
+//   b = banner pole (block)
+//   p = small pebble (passable, decorative)
+//   g = gate stone (block)
+//   r = roof tile (block) — for buildings
+//   s = sand (passable)
+//   _ = wood plank (passable)
+//   * = floor decoration (passable)
+
+const PASSABLE = new Set([".", ",", "F", "=", "p", "s", "_", "*"]);
+
+// Hub — 사마천의 서재 (study). Wooden floor, scroll wall on top.
+// Three doors lead to the three chapters: 형가(top-left), 항우(top-mid), 유방(top-right) — represented by vermilion gates.
+// Hub layout: 17 rows × 30 cols. Stone wall on top with a scroll-wall band; three vermilion
+// portal plinths sit on the wood floor at columns 5, 14, 23 (drawn as gates, walkable up to).
+const MAP_HUB = (
+  "##############################" + // 0
+  "#XXXXXXXXXXXXXXXXXXXXXXXXXXXX#" + // 1
+  "#XrrrrrrrrXrrrrrrrrXrrrrrrrrX#" + // 2  scroll wall band (decor)
+  "#XrrrrrrrrXrrrrrrrrXrrrrrrrrX#" + // 3
+  "#XXXXXXXXXXXXXXXXXXXXXXXXXXXX#" + // 4  divider
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 5  walkable wood floor begins
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 6
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 7
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 8
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 9
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 10
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 11
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 12
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 13
+  "#FFFFFFFFFFFFFFFFFFFFFFFFFFFF#" + // 14
+  "#XXXXXXXXXXXXXXXXXXXXXXXXXXXX#" + // 15
+  "##############################"   // 16
+);
+
+// All chapter maps are 30 cols × 17 rows. Each line MUST be exactly 30 chars.
+// 易水 — riverbank at twilight. River across the bottom; willow trees & path.
+const MAP_YISU = (
+  "##############################" + // 0
+  "#,,,T,,,,,,,T,,,,,,,T,,,,T,,,#" + // 1
+  "#,,,,,,,T,,,,,,,T,,,,,,,,,,,,#" + // 2
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,T,,#" + // 3
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 4
+  "#,,,,,========,,,,,,,,,,,,,,,#" + // 5
+  "#,,,,========,,,,,,,T,,,,,,,,#" + // 6
+  "#,,,,,====,,,,,,,,,,,,,,,,,,,#" + // 7
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 8
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 9
+  "#ssssssssssssssssssssssssssss#" + // 10
+  "#ssssssssssssssssssssssssssss#" + // 11
+  "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~#" + // 12
+  "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~#" + // 13
+  "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~#" + // 14
+  "##############################" + // 15
+  "##############################"   // 16
+);
+
+// 거록 — 항우 camp. Vermilion banners, cooking pots, river behind.
+const MAP_GEOROK = (
+  "##############################" + // 0
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 1
+  "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~#" + // 2
+  "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~#" + // 3
+  "#ssssssssssssssssssssssssssss#" + // 4
+  "#,,,,,b,,,,,,b,,,,,,,b,,,,,,,#" + // 5
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 6
+  "#,,,,,,,,o,,o,,,o,,,,,,,,,,,,#" + // 7
+  "#,,,,,,,o,,,,,,,,o,,,,,,,,,,,#" + // 8
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 9
+  "#,,,,,,,,o,,o,,,o,,,,,,,,,,,,#" + // 10
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 11
+  "#,,,,b,,,,,,,b,,,,,,b,,,,,,,,#" + // 12
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 13
+  "#,,,,,,,,,,,,,,,,,,,,,,,,,,,,#" + // 14
+  "##############################" + // 15
+  "##############################"   // 16
+);
+
+// 함양 — 유방 gate. Stone walls, jade banners, paved path.
+const MAP_HAMYANG = (
+  "##############################" + // 0
+  "#XXXXXXXXXXXggggggggXXXXXXXXX#" + // 1
+  "#XXXXXXXXXXXggggggggXXXXXXXXX#" + // 2
+  "#XXXXXXXXXXXXX..XXXXXXXXXXXXX#" + // 3
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 4
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 5
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 6
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 7
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 8
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 9
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 10
+  "#,,T,,,,,,,,,==,,,,,,,,,T,,,,#" + // 11
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 12
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 13
+  "#,,,,,,,,,,,,==,,,,,,,,,,,,,,#" + // 14
+  "##############################" + // 15
+  "##############################"   // 16
+);
+
+// Helper: get tile at (tx, ty) for a given map string
+function tileAt(mapStr, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= TILES_W || ty >= TILES_H) return "#";
+  return mapStr[ty * TILES_W + tx];
+}
+
+// ============================================================
+// ===== SCENES ================================================
+// ============================================================
+const SCENES = {
+  hub: {
+    id: "hub",
+    name: "사마천의 서재 (序齋)",
+    chapter: "서장 — 죽간을 모으세요",
+    map: MAP_HUB,
+    palette: { floor: C.parchment, accent: C.parchmentDk, wall: C.brown, sub: C.ink },
+    npcs: () => [
+      { id: "sima", name: "사마천 (司馬遷)",
+        seal: "司",
+        sprite: NPC_SIMA, x: 14*TILE+TILE/2, y: 8*TILE+TILE/2,
+        dialogId: "sima",
+      },
+    ],
+    portals: [
+      // Three vermilion portal plinths on the wood floor (row 5 — just below the scroll wall)
+      { tx: 5,  ty: 5, label: "易水 (역수)",  scene: "yisu",   spawn: {x: 22*TILE+TILE/2, y: 4*TILE+TILE/2} },
+      { tx: 14, ty: 5, label: "鉅鹿 (거록)",  scene: "georok", spawn: {x: 22*TILE+TILE/2, y: 13*TILE+TILE/2} },
+      { tx: 23, ty: 5, label: "咸陽 (함양)",  scene: "hamyang",spawn: {x: 22*TILE+TILE/2, y: 13*TILE+TILE/2} },
+    ],
+    spawn: { x: 15*TILE, y: 10*TILE },
+  },
+
+  yisu: {
+    id: "yisu",
+    name: "易水 (역수)",
+    chapter: "제1장 — 역수의 노래",
+    map: MAP_YISU,
+    palette: { floor: C.parchment, accent: C.parchmentDk, wall: C.twilightDk, sub: C.twilight, ambient: C.twilight },
+    npcs: () => [
+      { id: "hyeongga", name: "형가 (荊軻)",
+        seal: "荊",
+        sprite: NPC_HYEONGGA, x: 14*TILE+TILE/2, y: 6*TILE+TILE/2,
+        dialogId: "hyeongga",
+      },
+    ],
+    portals: [
+      // visible exit gate inside the playable area, near top-left
+      { tx: 2,  ty: 4, label: "← 서재", scene: "hub", spawn: {x: 5*TILE+TILE/2,  y: 8*TILE+TILE/2} },
+    ],
+    spawn: { x: 22*TILE, y: 4*TILE+TILE/2 },
+  },
+
+  georok: {
+    id: "georok",
+    name: "鉅鹿 (거록)",
+    chapter: "제2장 — 破釜沈舟",
+    map: MAP_GEOROK,
+    palette: { floor: C.parchment, accent: C.parchmentDk, wall: C.vermilionDk, sub: C.vermilion, ambient: C.vermilion },
+    npcs: () => [
+      { id: "hangu", name: "항우 (項羽)",
+        seal: "項",
+        sprite: NPC_HANGU, x: 13*TILE+TILE/2, y: 9*TILE+TILE/2,
+        dialogId: "hangu",
+      },
+    ],
+    portals: [
+      { tx: 2,  ty: 6, label: "← 서재", scene: "hub", spawn: {x: 14*TILE+TILE/2, y: 8*TILE+TILE/2} },
+    ],
+    spawn: { x: 22*TILE, y: 13*TILE+TILE/2 },
+  },
+
+  hamyang: {
+    id: "hamyang",
+    name: "咸陽 (함양)",
+    chapter: "제3장 — 約法三章",
+    map: MAP_HAMYANG,
+    palette: { floor: C.parchment, accent: C.parchmentDk, wall: C.jadeDk, sub: C.jade, ambient: C.jade },
+    npcs: () => [
+      { id: "yubang", name: "유방 (劉邦)",
+        seal: "劉",
+        sprite: NPC_YUBANG, x: 14*TILE+TILE/2, y: 6*TILE+TILE/2,
+        dialogId: "yubang",
+      },
+    ],
+    portals: [
+      { tx: 2,  ty: 5, label: "← 서재", scene: "hub", spawn: {x: 23*TILE+TILE/2, y: 8*TILE+TILE/2} },
+    ],
+    spawn: { x: 22*TILE, y: 13*TILE+TILE/2 },
+  },
+};
+
+// ============================================================
+// ===== DIALOGUE TREES ========================================
+// ============================================================
+// Each dialog node:
+//   { speaker, text, choices?: [{label, next}], next?, action? }
+// "action" can be: "award:hyeongga" / "award:hangu" / "award:yubang" / "end"
+//
+// 형가, 항우, 유방 each have a branching tree with at least 6 nodes and ≥2 choices.
+
+const DIALOGS = {
+  sima: {
+    start: "s0",
+    nodes: {
+      s0: { speaker: "사마천", text: "어서 오너라, 어린 사관(史官)아. 너는 오늘 사기(史記)에 적힌 세 영웅을 만나러 갈 것이다.", next: "s1" },
+      s1: { speaker: "사마천", text: "가장자리의 빨간 문(門) 세 개가 보이느냐? 易水(역수), 鉅鹿(거록), 咸陽(함양). 각 곳에서 죽간(竹簡)을 하나씩 받아 오너라.", next: "s2" },
+      s2: { speaker: "사마천", text: "이야기를 들으면 죽간이 채워지고, 벽의 두루마리가 풀려갈 것이다. 가서, 보고, 적어 오너라.", action: "end" },
+    }
+  },
+
+  hyeongga: {
+    start: "h0",
+    nodes: {
+      h0: { speaker: "형가", text: "오, 사관아. 강바람이 차구나. 나는 오늘 진(秦)의 왕을 만나러 떠난다.", next: "h1" },
+      h1: { speaker: "형가", text: "두렵지 않냐고? — 두렵다. 그러나 두려움이 곧 비겁(卑怯)은 아니다.",
+            choices: [
+              { label: "왜 그래도 가시나요?", next: "h2a" },
+              { label: "노래를 들려주세요.",  next: "h2b" },
+            ] },
+      h2a: { speaker: "형가", text: "약속이란 그런 것이다. 사람이 사람에게 한 약속은, 강물처럼 되돌릴 수 없다.", next: "h3" },
+      h2b: { speaker: "형가", text: "風蕭蕭兮易水寒 / 壯士一去兮不復還 — 바람은 쓸쓸하고 역수는 차다. 장사 한 번 가면 다시 오지 못하리라.", next: "h3" },
+      h3: { speaker: "형가", text: "사관아, 한 가지만 기억해라. 용기는 두려움이 없는 것이 아니라, 두려워도 한 걸음을 내딛는 것이다.", next: "h4" },
+      h4: { speaker: "형가", text: "내 이야기는 자객열전(刺客列傳)에 적힐 것이다. 너의 죽간에도 적어 두거라.", action: "award:hyeongga" },
+    }
+  },
+
+  hangu: {
+    start: "g0",
+    nodes: {
+      g0: { speaker: "항우", text: "하하, 어린 사관! 강을 건너왔으니, 이제 돌아갈 길은 없다.", next: "g1" },
+      g1: { speaker: "항우", text: "보아라, 여기 솥(釜)이 있다. 우리는 오늘밤 이 솥들을 모두 깨고, 배를 가라앉힐 것이다.",
+            choices: [
+              { label: "왜 그래야 하나요?",        next: "g2a" },
+              { label: "병사들이 무서워하지 않을까요?", next: "g2b" },
+            ] },
+      g2a: { speaker: "항우", text: "돌아갈 곳이 없으면, 사람은 비로소 앞만 본다. 이것이 破釜沈舟(파부침주)다.", next: "g3" },
+      g2b: { speaker: "항우", text: "두려움보다 큰 것이 결심(決心)이다. 모두가 같은 결심을 하면, 두려움은 작아진다.", next: "g3" },
+      g3: { speaker: "항우", text: "사관아, 너에게 묻는다. 이 셋 중 우리가 깨야 할 것은?",
+            choices: [
+              { label: "1) 솥(釜)",   next: "g4_pot" },
+              { label: "2) 깃발(旗)", next: "g4_flag" },
+              { label: "3) 활(弓)",   next: "g4_bow" },
+            ] },
+      g4_pot:  { speaker: "항우", text: "그렇다! 솥을 깨면 더 이상 밥을 지을 수 없으니, 이기지 않으면 굶는다. 그래서 이긴다.", next: "g5" },
+      g4_flag: { speaker: "항우", text: "깃발은 우리의 마음이다. 깃발은 결코 내리지 않는다. 다시 골라보겠느냐?", next: "g3" },
+      g4_bow:  { speaker: "항우", text: "활은 무기다. 무기를 깨면 어찌 싸우겠느냐? 다시 생각해 보아라.", next: "g3" },
+      g5: { speaker: "항우", text: "破釜沈舟 — 솥을 깨고 배를 가라앉힌다. 죽간에 적어 가거라, 어린 사관!", action: "award:hangu" },
+    }
+  },
+
+  yubang: {
+    start: "y0",
+    nodes: {
+      y0: { speaker: "유방", text: "어서 오게, 어린 벗. 함양(咸陽)의 문이 막 열렸네.", next: "y1" },
+      y1: { speaker: "유방", text: "진(秦)의 법은 너무 많고 무서웠지. 백성은 조금만 잘못해도 벌을 받았다네.",
+            choices: [
+              { label: "법을 모두 없애나요?", next: "y2a" },
+              { label: "그럼 어떻게 하나요?", next: "y2b" },
+            ] },
+      y2a: { speaker: "유방", text: "법이 없으면 강한 자가 약한 자를 짓누른다네. 법은 필요하다 — 다만 적고 공평해야지.", next: "y3" },
+      y2b: { speaker: "유방", text: "딱 세 가지만 두기로 했네. 約法三章(약법삼장)일세. 사관아, 셋을 골라보겠나?", next: "y3" },
+      y3: { speaker: "유방", text: "여섯 중에서 가장 중요한 셋은?",
+            choices: [
+              { label: "1) 살인(殺人) 금지", next: "y4_kill" },
+              { label: "2) 색깔 옷 금지",   next: "y4_color" },
+              { label: "3) 음악 금지",      next: "y4_music" },
+            ] },
+      y4_kill:  { speaker: "유방", text: "옳다. 사람을 해치는 것은 가장 큰 죄. 그리고 상해(傷害)와 도둑(盜)을 더해 셋이 된다네.", next: "y5" },
+      y4_color: { speaker: "유방", text: "허허, 옷 색깔이 무슨 죄가 되겠는가? 다시 생각해 보게.", next: "y3" },
+      y4_music: { speaker: "유방", text: "음악은 사람을 위로한다네. 그것을 금하면 백성이 슬퍼하지. 다시!", next: "y3" },
+      y5: { speaker: "유방", text: "약법삼장 — 살인, 상해, 도둑. 단 세 줄의 법으로 함양은 평온해졌네. 자네의 죽간에도 적어 두게.", action: "award:yubang" },
+    }
+  },
+};
+
+// ============================================================
+// ===== JUKGAN (BAMBOO SLIPS) — collected lessons ============
+// ============================================================
+const JUKGAN_DEFS = [
+  { id: "hyeongga", title: "刺客列傳 — 易水歌", subtitle: "역수의 노래",
+    lesson: "두려움이 없는 것이 아니라, 두려워도 한 걸음을 내딛는 것 — 그것이 용기." },
+  { id: "hangu",    title: "項羽本紀 — 破釜沈舟", subtitle: "솥을 깨고 배를 가라앉히다",
+    lesson: "돌아갈 곳을 없애면, 사람은 비로소 앞을 본다. 결심은 두려움보다 크다." },
+  { id: "yubang",   title: "高祖本紀 — 約法三章", subtitle: "법은 단 세 줄",
+    lesson: "법이 적고 공평하면, 백성은 평온하다. 살인·상해·도둑 — 그 셋이면 충분하다." },
+];
+
+// ============================================================
+// ===== GAME STATE ============================================
+// ============================================================
+const STATE = {
+  TITLE:    "title",
+  PLAYING:  "playing",
+  DIALOGUE: "dialogue",
+  INVENTORY:"inventory",
+  GLOSSARY: "glossary",
+  CHAPTER_CARD: "chapter_card",
+  TRANSITION:   "transition",
+  WIN:      "win",
+};
+
+const game = {
+  state: STATE.TITLE,
+  prevState: STATE.TITLE,
+  scene: "hub",
+  player: {
+    x: SCENES.hub.spawn.x,
+    y: SCENES.hub.spawn.y,
+    facing: "down",
+    walkFrame: 0,
+    walkTimer: 0,
+    moving: false,
+  },
+  npcs: [],            // built per scene
+  portals: [],
+  collected: new Set(),// jukgan ids
+  // dialogue
+  dialog: null,        // current dialog tree
+  dialogNodeId: null,
+  dialogText: "",
+  dialogShown: 0,      // typewriter index
+  dialogTimer: 0,
+  dialogChoiceIdx: 0,
+  dialogPendingAward: null,
+  // chapter card
+  cardText: { hanja: "", korean: "", subtitle: "" },
+  cardTimer: 0,
+  cardDuration: 1800,
+  // transition (ink wipe)
+  transTimer: 0,
+  transDuration: 700,
+  transPhase: "out",   // "out" then "in"
+  transTarget: null,   // {scene, spawn}
+  // dust particles
+  dust: [],
+  // ink particles for title screen
+  inkParticles: [],
+  // title selection
+  titleIdx: 0,
+  // win screen scroll progress
+  winProgress: 0,
+  // global timer for animations
+  t: 0,
+  // visual flash on collect
+  flashTimer: 0,
+  // notification toast
+  toast: null,
+  toastTimer: 0,
+  // first-load splash
+  bootTimer: 1100,
+};
+
+function loadInto(scene, spawn) {
+  game.scene = scene;
+  const s = SCENES[scene];
+  game.npcs = s.npcs();
+  game.portals = s.portals;
+  if (spawn) {
+    game.player.x = spawn.x;
+    game.player.y = spawn.y;
+  } else {
+    game.player.x = s.spawn.x;
+    game.player.y = s.spawn.y;
+  }
+  game.player.facing = "down";
+  sfxScene();
+}
+
+// Show chapter card on first entry to chapter scenes
+const cardsShown = new Set();
+
+function maybeShowChapterCard() {
+  const s = SCENES[game.scene];
+  if (s.id === "hub") return false;
+  if (cardsShown.has(s.id)) return false;
+  cardsShown.add(s.id);
+  let hanja, korean, subtitle;
+  if (s.id === "yisu")    { hanja = "易水歌"; korean = "역수의 노래"; subtitle = "刺客列傳 · 형가"; }
+  if (s.id === "georok")  { hanja = "破釜沈舟"; korean = "솥을 깨다"; subtitle = "項羽本紀 · 항우"; }
+  if (s.id === "hamyang") { hanja = "約法三章"; korean = "세 줄의 법"; subtitle = "高祖本紀 · 유방"; }
+  game.cardText = { hanja, korean, subtitle };
+  game.cardTimer = game.cardDuration;
+  game.state = STATE.CHAPTER_CARD;
+  return true;
+}
+
+// ============================================================
+// ===== DIALOGUE ENGINE =======================================
+// ============================================================
+function startDialog(npcDialogId) {
+  const tree = DIALOGS[npcDialogId];
+  if (!tree) return;
+  game.dialog = tree;
+  game.dialogNodeId = tree.start;
+  const node = tree.nodes[tree.start];
+  game.dialogText = node.text;
+  game.dialogShown = 0;
+  game.dialogTimer = 0;
+  game.dialogChoiceIdx = 0;
+  game.state = STATE.DIALOGUE;
+  sfxTalk();
+}
+
+function dialogNode() {
+  return game.dialog?.nodes[game.dialogNodeId];
+}
+
+function advanceDialog() {
+  const node = dialogNode();
+  if (!node) { game.state = STATE.PLAYING; return; }
+
+  // If text is still typing, complete it.
+  if (game.dialogShown < game.dialogText.length) {
+    game.dialogShown = game.dialogText.length;
+    return;
+  }
+
+  // If there are choices, "advance" doesn't apply — wait for 1/2/3
+  if (node.choices) return;
+
+  // If action present
+  if (node.action === "end") {
+    game.dialog = null;
+    game.dialogNodeId = null;
+    game.state = STATE.PLAYING;
+    return;
+  }
+  if (node.action && node.action.startsWith("award:")) {
+    const id = node.action.split(":")[1];
+    awardJukgan(id);
+    game.dialog = null;
+    game.dialogNodeId = null;
+    game.state = STATE.PLAYING;
+    return;
+  }
+
+  // Move to next node
+  if (node.next) {
+    moveToNode(node.next);
+  } else {
+    game.dialog = null;
+    game.dialogNodeId = null;
+    game.state = STATE.PLAYING;
+  }
+}
+
+function moveToNode(id) {
+  game.dialogNodeId = id;
+  const node = game.dialog.nodes[id];
+  game.dialogText = node.text;
+  game.dialogShown = 0;
+  game.dialogTimer = 0;
+  game.dialogChoiceIdx = 0;
+  sfxTalk();
+}
+
+function chooseDialog(idx) {
+  const node = dialogNode();
+  if (!node || !node.choices) return;
+  const ch = node.choices[idx];
+  if (!ch) return;
+  moveToNode(ch.next);
+}
+
+function awardJukgan(id) {
+  if (game.collected.has(id)) return;
+  game.collected.add(id);
+  const def = JUKGAN_DEFS.find(j => j.id === id);
+  showToast(`죽간 +1 · ${def ? def.subtitle : id}`);
+  game.flashTimer = 600;
+  sfxCollect();
+  // Win condition
+  if (game.collected.size >= JUKGAN_DEFS.length) {
+    setTimeout(() => {
+      game.state = STATE.WIN;
+      game.winProgress = 0;
+      sfxConfirm();
+    }, 900);
+  }
+}
+
+function showToast(text) {
+  game.toast = text;
+  game.toastTimer = 2200;
+}
+
+// ============================================================
+// ===== UPDATE ================================================
+// ============================================================
+function update(dt) {
+  game.t += dt;
+
+  // Boot splash
+  if (game.bootTimer > 0) {
+    game.bootTimer -= dt;
+    return;
+  }
+
+  // Ink particles (title screen)
+  if (game.state === STATE.TITLE) {
+    if (game.inkParticles.length < 30) {
+      game.inkParticles.push({
+        x: Math.random() * W,
+        y: -20,
+        vy: 20 + Math.random() * 25,
+        size: 1 + Math.floor(Math.random() * 3),
+        alpha: 0.2 + Math.random() * 0.4,
+      });
+    }
+    for (const p of game.inkParticles) {
+      p.y += p.vy * dt / 1000;
+    }
+    game.inkParticles = game.inkParticles.filter(p => p.y < H + 20);
+
+    if (consume("up"))   { game.titleIdx = (game.titleIdx + 1) % 2; sfxOpen(); }
+    else if (consume("down")) { game.titleIdx = (game.titleIdx + 1) % 2; sfxOpen(); }
+    if (consume("action")) {
+      ensureAudio();
+      sfxConfirm();
+      if (game.titleIdx === 0) {
+        // Start
+        loadInto("hub");
+        game.state = STATE.PLAYING;
+      } else {
+        // Reset progress (already a fresh game). Just start.
+        loadInto("hub");
+        game.state = STATE.PLAYING;
+      }
+    }
+    return;
+  }
+
+  // Mute toggle anywhere
+  if (consume("mute")) { toggleMute(); showToast(muted ? "음소거 켬" : "음소거 끔"); }
+
+  // Toast countdown
+  if (game.toastTimer > 0) game.toastTimer -= dt;
+  if (game.flashTimer > 0) game.flashTimer -= dt;
+
+  // Chapter card state
+  if (game.state === STATE.CHAPTER_CARD) {
+    game.cardTimer -= dt;
+    if (game.cardTimer <= 0 || consume("action")) {
+      game.state = STATE.PLAYING;
+    }
+    return;
+  }
+
+  // Transition state
+  if (game.state === STATE.TRANSITION) {
+    game.transTimer += dt;
+    if (game.transPhase === "out" && game.transTimer >= game.transDuration / 2) {
+      // Apply target
+      if (game.transTarget) {
+        loadInto(game.transTarget.scene, game.transTarget.spawn);
+        game.transTarget = null;
+      }
+      game.transPhase = "in";
+    }
+    if (game.transTimer >= game.transDuration) {
+      game.state = STATE.PLAYING;
+      game.transTimer = 0;
+      game.transPhase = "out";
+      // After scene loads, maybe show chapter card
+      maybeShowChapterCard();
+    }
+    return;
+  }
+
+  // Inventory overlay
+  if (game.state === STATE.INVENTORY) {
+    if (consume("inventory") || consume("action") || consume("pause")) {
+      game.state = STATE.PLAYING;
+      sfxOpen();
+    }
+    return;
+  }
+
+  // Glossary overlay
+  if (game.state === STATE.GLOSSARY) {
+    if (consume("glossary") || consume("action") || consume("pause")) {
+      game.state = STATE.PLAYING;
+      sfxOpen();
+    }
+    return;
+  }
+
+  // Win screen
+  if (game.state === STATE.WIN) {
+    game.winProgress = Math.min(1, game.winProgress + dt / 2400);
+    if (consume("action")) {
+      // Restart
+      game.collected.clear();
+      cardsShown.clear();
+      game.state = STATE.TITLE;
+    }
+    return;
+  }
+
+  // Dialogue
+  if (game.state === STATE.DIALOGUE) {
+    // Typewriter
+    const node = dialogNode();
+    if (node && game.dialogShown < game.dialogText.length) {
+      game.dialogTimer += dt;
+      const charsPerMs = 30 / 1000; // 30 cps
+      const total = Math.floor(game.dialogTimer * charsPerMs);
+      if (total > game.dialogShown) {
+        game.dialogShown = Math.min(game.dialogText.length, total);
+      }
+    }
+    if (consume("action")) advanceDialog();
+    if (consume("c1")) chooseDialog(0);
+    if (consume("c2")) chooseDialog(1);
+    if (consume("c3")) chooseDialog(2);
+    return;
+  }
+
+  // PLAYING
+  if (game.state === STATE.PLAYING) {
+
+    // Open inventory / glossary
+    if (consume("inventory")) { game.state = STATE.INVENTORY; sfxOpen(); return; }
+    if (consume("glossary"))  { game.state = STATE.GLOSSARY;  sfxOpen(); return; }
+
+    const speed = 0.16; // pixels per ms (~9.6 px/frame at 60fps)
+    let dx = 0, dy = 0;
+    if (keys.up)    dy -= 1;
+    if (keys.down)  dy += 1;
+    if (keys.left)  dx -= 1;
+    if (keys.right) dx += 1;
+
+    // Normalize diagonal
+    if (dx !== 0 && dy !== 0) {
+      const inv = 1 / Math.SQRT2;
+      dx *= inv; dy *= inv;
+    }
+
+    const oldX = game.player.x, oldY = game.player.y;
+    if (dx !== 0 || dy !== 0) {
+      game.player.moving = true;
+      // Update facing — prioritize the more recent axis
+      if (Math.abs(dx) > Math.abs(dy)) {
+        game.player.facing = dx < 0 ? "left" : "right";
+      } else {
+        game.player.facing = dy < 0 ? "up" : "down";
+      }
+    } else {
+      game.player.moving = false;
+    }
+
+    // Move with collision (separate axes for wall sliding)
+    const newX = game.player.x + dx * speed * dt;
+    if (!collidesWithWorld(newX, game.player.y)) {
+      game.player.x = newX;
+    }
+    const newY = game.player.y + dy * speed * dt;
+    if (!collidesWithWorld(game.player.x, newY)) {
+      game.player.y = newY;
+    }
+
+    // Walk animation
+    if (game.player.moving) {
+      game.player.walkTimer += dt;
+      if (game.player.walkTimer > 180) {
+        game.player.walkTimer = 0;
+        game.player.walkFrame = 1 - game.player.walkFrame;
+        // Spawn dust + footstep sfx every leg-swap
+        spawnDust(game.player.x, game.player.y + 20);
+        sfxStep();
+      }
+    } else {
+      game.player.walkFrame = 0;
+    }
+
+    // Update dust particles
+    for (const d of game.dust) {
+      d.life -= dt;
+      d.x += d.vx * dt / 1000;
+      d.y += d.vy * dt / 1000;
+    }
+    game.dust = game.dust.filter(d => d.life > 0);
+
+    // Portal check (auto-trigger when stepping on portal tile)
+    for (const p of game.portals) {
+      const px = p.tx * TILE + TILE / 2;
+      const py = p.ty * TILE + TILE / 2;
+      const dxp = game.player.x - px, dyp = game.player.y - py;
+      if (Math.abs(dxp) < TILE * 0.6 && Math.abs(dyp) < TILE * 0.7) {
+        // Trigger transition
+        game.state = STATE.TRANSITION;
+        game.transTimer = 0;
+        game.transPhase = "out";
+        game.transTarget = { scene: p.scene, spawn: p.spawn };
+        return;
+      }
+    }
+
+    // Talk to NPC
+    if (consume("action")) {
+      const npc = nearestInteractableNPC();
+      if (npc) {
+        startDialog(npc.dialogId);
+      }
+    }
+  }
+}
+
+function spawnDust(x, y) {
+  for (let i = 0; i < 3; i++) {
+    game.dust.push({
+      x: x + (Math.random() - 0.5) * 6,
+      y: y + (Math.random() - 0.5) * 2,
+      vx: (Math.random() - 0.5) * 6,
+      vy: -2 - Math.random() * 6,
+      life: 220 + Math.random() * 100,
+      lifeMax: 320,
+    });
+  }
+}
+
+function collidesWithWorld(px, py) {
+  const map = SCENES[game.scene].map;
+  // Player collision box: 20×16 footprint centered on (px, py) bottom area
+  const halfW = 9, halfH = 6, footY = 12; // foot is 12px below center
+  const corners = [
+    [px - halfW, py + footY - halfH],
+    [px + halfW, py + footY - halfH],
+    [px - halfW, py + footY + halfH],
+    [px + halfW, py + footY + halfH],
+  ];
+  for (const [cx, cy] of corners) {
+    const tx = Math.floor(cx / TILE);
+    const ty = Math.floor(cy / TILE);
+    const t = tileAt(map, tx, ty);
+    if (!PASSABLE.has(t)) return true;
+  }
+  return false;
+}
+
+function nearestInteractableNPC() {
+  let best = null, bestD = 999999;
+  for (const n of game.npcs) {
+    const dx = n.x - game.player.x, dy = n.y - game.player.y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < 56 * 56 && d2 < bestD) { best = n; bestD = d2; }
+  }
+  return best;
+}
+
+// ============================================================
+// ===== RENDER ================================================
+// ============================================================
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+function clearCanvas(color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// --- Tile rendering ---
+function drawTile(tx, ty, ch, paletteHint) {
+  const x = tx * TILE, y = ty * TILE;
+  // Floor base
+  if (ch === "." || ch === "F" || ch === "*" || ch === "p" || ch === "_") {
+    // parchment floor — but wood plank for hub
+    ctx.fillStyle = (ch === "F") ? "#C8A674" : C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    if (ch === "F") {
+      // wood grain lines
+      ctx.fillStyle = "#A07A4A";
+      ctx.fillRect(x, y, TILE, 2);
+      ctx.fillRect(x, y + TILE - 2, TILE, 2);
+      ctx.fillStyle = "#8C6638";
+      ctx.fillRect(x + 6, y + 4, 2, TILE - 8);
+      ctx.fillRect(x + 22, y + 4, 2, TILE - 8);
+    }
+    if (ch === "p") {
+      ctx.fillStyle = C.stoneDk;
+      ctx.fillRect(x + 10, y + 18, 4, 3);
+      ctx.fillRect(x + 18, y + 8, 3, 3);
+    }
+    if (ch === "*") {
+      ctx.fillStyle = C.gold;
+      ctx.fillRect(x + 14, y + 14, 4, 4);
+    }
+    return;
+  }
+
+  // Grass / earth (subtle parchment + ink flecks)
+  if (ch === ",") {
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = paletteHint?.sub || C.inkSoft;
+    ctx.globalAlpha = 0.18;
+    // deterministic stipple based on (tx, ty)
+    const seed = (tx * 73 + ty * 131) % 7;
+    for (let i = 0; i < 3; i++) {
+      const sx = ((seed + i * 11) % 28) + 2;
+      const sy = ((seed * 3 + i * 7) % 28) + 2;
+      ctx.fillRect(x + sx, y + sy, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // Sand (riverbank)
+  if (ch === "s") {
+    ctx.fillStyle = C.sand;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = "#BFA56C";
+    const seed = (tx * 17 + ty * 31) % 5;
+    ctx.fillRect(x + seed * 4, y + ((seed + 2) % 5) * 4, 2, 2);
+    return;
+  }
+
+  // Wall (#) — solid ink-brown brick
+  if (ch === "#") {
+    ctx.fillStyle = paletteHint?.wall || C.brown;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(x, y + TILE - 3, TILE, 3);
+    ctx.fillRect(x, y, 3, TILE);
+    return;
+  }
+
+  // Stone wall (X) — large blocks
+  if (ch === "X") {
+    ctx.fillStyle = C.stone;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.stoneDk;
+    ctx.fillRect(x, y + TILE - 2, TILE, 2);
+    ctx.fillRect(x, y, TILE, 2);
+    ctx.fillRect(x, y, 2, TILE);
+    ctx.fillRect(x + TILE / 2 - 1, y + 4, 2, TILE - 8);
+    return;
+  }
+
+  // Roof / scroll wall (r) — for hub backdrop
+  if (ch === "r") {
+    // Backdrop: hung scroll. Vertical strips of bamboo slips that fill in as 죽간 collected.
+    ctx.fillStyle = C.bambooLight;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.bambooDark;
+    // vertical bamboo segments
+    for (let i = 0; i < 3; i++) {
+      const sx = x + i * 11 + 2;
+      ctx.fillRect(sx, y + 2, 8, TILE - 4);
+      // segment dividers
+      ctx.fillStyle = C.brown;
+      ctx.fillRect(sx, y + 8, 8, 1);
+      ctx.fillRect(sx, y + 18, 8, 1);
+      ctx.fillStyle = C.bambooDark;
+    }
+    // Top binding
+    ctx.fillStyle = C.brown;
+    ctx.fillRect(x, y, TILE, 2);
+    ctx.fillRect(x, y + TILE - 2, TILE, 2);
+    return;
+  }
+
+  // Gate (g) — vermilion stone gate top with hanja
+  if (ch === "g") {
+    ctx.fillStyle = C.vermilion;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.vermilionDk;
+    ctx.fillRect(x, y + TILE - 4, TILE, 4);
+    ctx.fillStyle = C.gold;
+    ctx.fillRect(x + 4, y + 4, TILE - 8, 4);
+    return;
+  }
+
+  // Water (~) — animated horizontal stripes
+  if (ch === "~") {
+    const phase = Math.floor(game.t / 200) % 2;
+    ctx.fillStyle = C.river;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.riverDk;
+    // wave lines
+    ctx.fillRect(x, y + 6 + phase * 2, TILE, 2);
+    ctx.fillRect(x + 6, y + 16 - phase * 2, TILE - 12, 2);
+    ctx.fillRect(x, y + 24 + phase * 2, TILE, 2);
+    return;
+  }
+
+  // Tree (T) — willow at riverbank or pine
+  if (ch === "T") {
+    // floor under
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    // trunk
+    ctx.fillStyle = C.brown;
+    ctx.fillRect(x + 14, y + 18, 4, 12);
+    // canopy
+    ctx.fillStyle = paletteHint?.sub === C.twilight ? "#5B7A4F" : C.grass;
+    ctx.fillRect(x + 6, y + 4, 20, 18);
+    ctx.fillStyle = paletteHint?.sub === C.twilight ? "#3F5A36" : C.grassDk;
+    ctx.fillRect(x + 10, y + 8, 4, 4);
+    ctx.fillRect(x + 18, y + 14, 4, 4);
+    return;
+  }
+
+  // Path stones (=)
+  if (ch === "=") {
+    ctx.fillStyle = C.parchmentDker;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x + 4, y + 4, 10, 10);
+    ctx.fillRect(x + 18, y + 6, 8, 8);
+    ctx.fillRect(x + 6, y + 18, 8, 10);
+    ctx.fillRect(x + 18, y + 18, 10, 10);
+    return;
+  }
+
+  // Banner pole (b) — vermilion banner with gold rim
+  if (ch === "b") {
+    // floor under
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    // pole
+    ctx.fillStyle = C.brown;
+    ctx.fillRect(x + 15, y + 4, 2, TILE - 4);
+    // banner cloth
+    ctx.fillStyle = C.vermilion;
+    ctx.fillRect(x + 17, y + 6, 12, 18);
+    ctx.fillStyle = C.gold;
+    ctx.fillRect(x + 17, y + 6, 12, 2);
+    ctx.fillRect(x + 17, y + 22, 12, 2);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(x + 21, y + 10, 4, 2);
+    ctx.fillRect(x + 21, y + 14, 4, 2);
+    ctx.fillRect(x + 21, y + 18, 4, 2);
+    return;
+  }
+
+  // Pot (o) — bronze cooking pot
+  if (ch === "o") {
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    // legs
+    ctx.fillStyle = C.brown;
+    ctx.fillRect(x + 8, y + 24, 3, 6);
+    ctx.fillRect(x + 21, y + 24, 3, 6);
+    // body
+    ctx.fillStyle = C.stoneDk;
+    ctx.fillRect(x + 6, y + 10, 20, 16);
+    ctx.fillStyle = "#3a2a18";
+    ctx.fillRect(x + 6, y + 22, 20, 4);
+    // rim
+    ctx.fillStyle = C.gold;
+    ctx.fillRect(x + 4, y + 8, 24, 3);
+    return;
+  }
+
+  // Bamboo (B) — for ambient scenes
+  if (ch === "B") {
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = C.jadeDk;
+    ctx.fillRect(x + 12, y + 4, 4, 24);
+    ctx.fillRect(x + 18, y + 6, 4, 22);
+    ctx.fillStyle = C.jade;
+    ctx.fillRect(x + 12, y + 12, 4, 2);
+    ctx.fillRect(x + 18, y + 18, 4, 2);
+    return;
+  }
+
+  // Default: draw parchment
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(x, y, TILE, TILE);
+}
+
+function renderScene() {
+  const s = SCENES[game.scene];
+
+  // Ambient backdrop tint (twilight blue for 易水, vermilion-ish hub, etc.)
+  if (s.id === "yisu") {
+    // Twilight gradient feel
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, "#5C6B91");
+    grad.addColorStop(0.6, "#7A8AAB");
+    grad.addColorStop(1, "#A09877");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+  } else if (s.id === "georok") {
+    ctx.fillStyle = "#E5C5A8";
+    ctx.fillRect(0, 0, W, H);
+  } else if (s.id === "hamyang") {
+    ctx.fillStyle = "#E5DCB4";
+    ctx.fillRect(0, 0, W, H);
+  } else {
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Render tiles
+  for (let ty = 0; ty < TILES_H; ty++) {
+    for (let tx = 0; tx < TILES_W; tx++) {
+      const ch = tileAt(s.map, tx, ty);
+      drawTile(tx, ty, ch, s.palette);
+    }
+  }
+
+  // Hub: render scroll wall fill state — overlay seal for unlocked slots
+  if (s.id === "hub") {
+    // Title plaque on the wall
+    ctx.fillStyle = C.parchmentDk;
+    ctx.fillRect(11 * TILE + 8, 1 * TILE + 8, 8 * TILE - 16, TILE - 16);
+    ctx.fillStyle = C.ink;
+    ctx.font = "bold 18px 'Noto Serif KR', serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("史 記", 15 * TILE, 1 * TILE + TILE / 2);
+
+    // Scroll wall progress (seals appear over bamboo strips as 죽간 are collected)
+    drawScrollWallProgress();
+
+    // Three portal plinths on wood floor (row 5)
+    drawPortalGate(5,  5, "易水", "역수");
+    drawPortalGate(14, 5, "鉅鹿", "거록");
+    drawPortalGate(23, 5, "咸陽", "함양");
+  } else {
+    // Chapter scenes: draw the back-portal as a small "← 서재" gate
+    for (const p of game.portals) {
+      drawPortalGate(p.tx, p.ty, "歸", "← 서재로");
+    }
+  }
+
+  // Sort sprites (NPCs + player) by Y for proper depth
+  const sprites = [];
+  for (const n of game.npcs) sprites.push({ y: n.y, draw: () => drawNPC(n) });
+  sprites.push({ y: game.player.y, draw: drawPlayer });
+  sprites.sort((a, b) => a.y - b.y);
+  for (const s2 of sprites) s2.draw();
+
+  // Dust particles
+  for (const d of game.dust) {
+    const a = Math.max(0, d.life / d.lifeMax);
+    ctx.globalAlpha = a * 0.6;
+    ctx.fillStyle = C.parchmentDker;
+    ctx.fillRect(d.x | 0, d.y | 0, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // Twilight ambient overlay for 易水
+  if (s.id === "yisu") {
+    ctx.fillStyle = C.twilight;
+    ctx.globalAlpha = 0.18;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  // Flash overlay (collect feedback)
+  if (game.flashTimer > 0) {
+    const a = game.flashTimer / 600;
+    ctx.fillStyle = C.gold;
+    ctx.globalAlpha = a * 0.35;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawPortalGate(tx, ty, hanja, korean) {
+  const x = tx * TILE, y = ty * TILE;
+  // arch
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(x - 4, y, TILE + 8, 6);
+  ctx.fillStyle = C.vermilionDk;
+  ctx.fillRect(x - 4, y + 4, TILE + 8, 2);
+  // gold plaque
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(x + 2, y + 8, TILE - 4, 16);
+  ctx.fillStyle = C.ink;
+  ctx.font = "bold 14px 'Noto Serif KR', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(hanja, x + TILE / 2, y + 16);
+  // small Korean caption below (above the floor)
+  ctx.font = "10px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.ink;
+  ctx.fillText(korean, x + TILE / 2, y + 30);
+}
+
+function drawScrollWallProgress() {
+  // Render three "slots" on the scroll wall corresponding to each chapter
+  const slotIds = ["hyeongga", "hangu", "yubang"];
+  const slotLabels = ["荊", "項", "劉"];
+  const slotColors = [C.twilight, C.vermilion, C.jade];
+  for (let i = 0; i < 3; i++) {
+    const cx = 7 + i * 8;
+    const x = cx * TILE, y = 3 * TILE - 8;
+    // base parchment slip
+    ctx.fillStyle = C.parchmentDker;
+    ctx.fillRect(x, y, TILE * 4, TILE - 4);
+    if (game.collected.has(slotIds[i])) {
+      // filled with brushed text
+      ctx.fillStyle = C.parchment;
+      ctx.fillRect(x + 2, y + 2, TILE * 4 - 4, TILE - 8);
+      ctx.fillStyle = slotColors[i];
+      ctx.fillRect(x + 4, y + 4, TILE * 4 - 8, 4);
+      ctx.fillStyle = C.ink;
+      ctx.font = "bold 14px 'Noto Serif KR', serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(slotLabels[i], x + TILE * 2, y + (TILE - 4) / 2);
+      // vermilion seal in corner
+      ctx.fillStyle = C.vermilion;
+      ctx.fillRect(x + TILE * 4 - 12, y + TILE - 14, 8, 8);
+    } else {
+      // sealed
+      ctx.fillStyle = C.ink;
+      ctx.globalAlpha = 0.4;
+      ctx.font = "12px 'Nanum Gothic', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("미수집", x + TILE * 2, y + (TILE - 4) / 2);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function drawPlayer() {
+  const p = game.player;
+  // Idle bob
+  const bob = (!p.moving) ? Math.sin(game.t * 0.004) * 1 : 0;
+  const sprite = pickPlayerSprite();
+  const flip = (p.facing === "left");
+  const baseX = (p.x | 0) - (PLAYER_DOWN_A.w * PIXEL) / 2;
+  const baseY = (p.y | 0) - (PLAYER_DOWN_A.h * PIXEL) / 2 + bob;
+  // shadow
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect((p.x | 0) - 12, (p.y | 0) + 18, 24, 4);
+  drawSprite(ctx, sprite, baseX, baseY, PIXEL, flip);
+}
+
+function pickPlayerSprite() {
+  const f = game.player.facing;
+  const w = game.player.walkFrame;
+  if (f === "down") return w === 0 ? PLAYER_DOWN_A : PLAYER_DOWN_B;
+  if (f === "up")   return w === 0 ? PLAYER_UP_A   : PLAYER_UP_B;
+  return w === 0 ? PLAYER_SIDE_A : PLAYER_SIDE_B; // left or right
+}
+
+function drawNPC(n) {
+  const sprite = n.sprite;
+  // breathing bob
+  const bob = Math.sin((game.t + n.x * 7) * 0.0035) * 1;
+  const baseX = (n.x | 0) - (sprite.w * PIXEL) / 2;
+  const baseY = (n.y | 0) - (sprite.h * PIXEL) / 2 + bob;
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect((n.x | 0) - 14, (n.y | 0) + 18, 28, 4);
+  drawSprite(ctx, sprite, baseX, baseY, PIXEL);
+
+  // Exclamation if player is near
+  const dx = game.player.x - n.x, dy = game.player.y - n.y;
+  if (dx * dx + dy * dy < 56 * 56) {
+    drawExclaim(ctx, n.x | 0, baseY, game.t);
+  }
+}
+
+// ============================================================
+// ===== UI OVERLAYS ===========================================
+// ============================================================
+function renderHUD() {
+  const s = SCENES[game.scene];
+
+  // Top-left: chapter band (hanji, ink border, asymmetric — hangs left)
+  const bandW = 280;
+  ctx.fillStyle = C.parchmentDk;
+  ctx.fillRect(0, 0, bandW, 36);
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(0, 36, bandW, 2);
+  ctx.fillRect(bandW, 0, 2, 36);
+  // brushed accent line
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(8, 30, 60, 2);
+  ctx.fillStyle = C.ink;
+  ctx.font = "bold 14px 'Nanum Gothic', sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(s.chapter, 14, 14);
+  ctx.font = "10px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.fillText(s.name, 14, 28);
+
+  // Top-right: 죽간 counter with vermilion seal
+  const cx = W - 8, cy = 8, cw = 180, chh = 36;
+  ctx.fillStyle = C.parchmentDk;
+  ctx.fillRect(cx - cw, cy, cw, chh);
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(cx - cw - 2, cy, 2, chh);
+  ctx.fillRect(cx - cw, cy + chh, cw, 2);
+
+  // Draw 5 (or 3) bamboo slip pixels — fills as collected
+  const total = JUKGAN_DEFS.length;
+  const got = game.collected.size;
+  const slipsX = cx - cw + 12;
+  const slipsY = cy + 8;
+  for (let i = 0; i < total; i++) {
+    const sx = slipsX + i * 14;
+    const filled = i < got;
+    ctx.fillStyle = filled ? C.bambooDark : C.parchmentDker;
+    ctx.fillRect(sx, slipsY, 10, 20);
+    if (filled) {
+      ctx.fillStyle = C.bambooLight;
+      ctx.fillRect(sx + 2, slipsY + 2, 6, 16);
+      ctx.fillStyle = C.ink;
+      ctx.fillRect(sx + 4, slipsY + 5, 2, 2);
+      ctx.fillRect(sx + 4, slipsY + 9, 2, 2);
+      ctx.fillRect(sx + 4, slipsY + 13, 2, 2);
+    }
+  }
+  // Count text
+  ctx.font = "bold 14px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.fillText(`죽간 ${got} / ${total}`, cx - 36, cy + 18);
+
+  // vermilion seal
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(cx - 28, cy + 6, 24, 24);
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(cx - 26, cy + 8, 20, 20);
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(cx - 24, cy + 10, 16, 16);
+  ctx.fillStyle = C.parchment;
+  ctx.font = "bold 12px 'Noto Serif KR', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("史", cx - 16, cy + 18);
+
+  // Hint at bottom (small, only when on hub or near NPC) — not "QUEST!"
+  if (game.state === STATE.PLAYING) {
+    const npc = nearestInteractableNPC();
+    if (npc) {
+      const hint = `[Space] ${npc.name}와 이야기하기`;
+      ctx.fillStyle = "rgba(31,26,20,0.85)";
+      const tw = ctx.measureText(hint).width;
+      ctx.font = "bold 13px 'Nanum Gothic', sans-serif";
+      const tw2 = ctx.measureText(hint).width;
+      ctx.fillRect(W / 2 - tw2 / 2 - 14, H - 36, tw2 + 28, 24);
+      ctx.fillStyle = C.parchment;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(hint, W / 2, H - 24);
+    }
+  }
+}
+
+function renderDialogue() {
+  // Bottom hanji panel
+  const boxX = 24, boxY = H - 170, boxW = W - 48, boxH = 150;
+  // background
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+  // ink border
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(boxX, boxY, boxW, 3);
+  ctx.fillRect(boxX, boxY + boxH - 3, boxW, 3);
+  ctx.fillRect(boxX, boxY, 3, boxH);
+  ctx.fillRect(boxX + boxW - 3, boxY, 3, boxH);
+  // vermilion accent bar
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(boxX + 3, boxY + 3, boxW - 6, 4);
+
+  const node = dialogNode();
+  if (!node) return;
+
+  // Speaker name in vermilion (top-left, asymmetric)
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(boxX + 14, boxY + 14, 8, 26);
+  ctx.font = "bold 18px 'Nanum Gothic', 'Noto Serif KR', sans-serif";
+  ctx.fillStyle = C.vermilion;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(node.speaker, boxX + 30, boxY + 16);
+
+  // 도장 seal in bottom-right with character surname
+  const seal = pickSpeakerSeal(node.speaker);
+  const sx = boxX + boxW - 56, sy = boxY + boxH - 56;
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(sx, sy, 40, 40);
+  ctx.fillStyle = C.parchment;
+  ctx.font = "bold 24px 'Noto Serif KR', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(seal, sx + 20, sy + 22);
+
+  // Body text — typewriter
+  ctx.font = "16px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  const visible = game.dialogText.slice(0, game.dialogShown);
+  wrapText(visible, boxX + 32, boxY + 50, boxW - 110, 22);
+
+  // Choices (if typewriter complete)
+  if (node.choices && game.dialogShown >= game.dialogText.length) {
+    // Render compact choice list at bottom-right of inner area
+    const cx0 = boxX + 32;
+    const cy0 = boxY + boxH - 26 - (node.choices.length - 1) * 22;
+    ctx.font = "14px 'Nanum Gothic', sans-serif";
+    for (let i = 0; i < node.choices.length; i++) {
+      const ch = node.choices[i];
+      ctx.fillStyle = C.vermilion;
+      ctx.fillRect(cx0, cy0 + i * 22 - 2, 18, 18);
+      ctx.fillStyle = C.parchment;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), cx0 + 9, cy0 + i * 22 + 7);
+      ctx.fillStyle = C.ink;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(ch.label, cx0 + 26, cy0 + i * 22);
+    }
+  } else if (game.dialogShown >= game.dialogText.length) {
+    // "Press space" indicator
+    const blink = (Math.floor(game.t / 300) % 2) === 0;
+    if (blink) {
+      ctx.fillStyle = C.ink;
+      ctx.font = "12px 'Nanum Gothic', sans-serif";
+      ctx.textAlign = "right";
+      ctx.fillText("▾ Space", boxX + boxW - 66, boxY + boxH - 66);
+    }
+  }
+}
+
+function pickSpeakerSeal(speaker) {
+  if (!speaker) return "印";
+  if (speaker.includes("형가")) return "荊";
+  if (speaker.includes("항우")) return "項";
+  if (speaker.includes("유방")) return "劉";
+  if (speaker.includes("사마천")) return "司";
+  return "印";
+}
+
+function wrapText(text, x, y, maxW, lineH) {
+  const lines = [];
+  let line = "";
+  for (let i = 0; i < text.length; i++) {
+    const test = line + text[i];
+    if (ctx.measureText(test).width > maxW && line.length > 0) {
+      lines.push(line);
+      line = text[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line.length) lines.push(line);
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], x, y + i * lineH);
+  }
+}
+
+function renderInventory() {
+  // Backdrop
+  ctx.fillStyle = "rgba(31,26,20,0.6)";
+  ctx.fillRect(0, 0, W, H);
+
+  // Scroll panel — long horizontal scroll feel
+  const panelX = 80, panelY = 60, panelW = W - 160, panelH = H - 120;
+  // scroll rod left + right
+  ctx.fillStyle = C.brown;
+  ctx.fillRect(panelX - 24, panelY - 6, 24, panelH + 12);
+  ctx.fillRect(panelX + panelW, panelY - 6, 24, panelH + 12);
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(panelX - 24, panelY - 6, 24, 6);
+  ctx.fillRect(panelX - 24, panelY + panelH, 24, 6);
+  ctx.fillRect(panelX + panelW, panelY - 6, 24, 6);
+  ctx.fillRect(panelX + panelW, panelY + panelH, 24, 6);
+
+  // parchment
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(panelX, panelY, panelW, panelH);
+  // borders
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(panelX, panelY, panelW, 2);
+  ctx.fillRect(panelX, panelY + panelH - 2, panelW, 2);
+
+  // Header
+  ctx.font = "bold 24px 'Noto Serif KR', serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("竹簡 — 죽간", panelX + 24, panelY + 18);
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(panelX + 24, panelY + 50, 90, 3);
+
+  ctx.font = "13px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.textAlign = "right";
+  ctx.fillText(`${game.collected.size} / ${JUKGAN_DEFS.length}`, panelX + panelW - 24, panelY + 24);
+
+  // Empty state
+  if (game.collected.size === 0) {
+    ctx.font = "16px 'Nanum Gothic', sans-serif";
+    ctx.fillStyle = C.inkSoft;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("아직 모은 죽간이 없어요. 사람들과 이야기해 보세요!", panelX + panelW / 2, panelY + panelH / 2);
+  } else {
+    // Render each collected jukgan as a vertical bamboo slip
+    let i = 0;
+    for (const def of JUKGAN_DEFS) {
+      if (!game.collected.has(def.id)) continue;
+      const slipX = panelX + 32 + i * 92;
+      const slipY = panelY + 80;
+      const slipW = 80, slipH = 240;
+      // slip background
+      ctx.fillStyle = C.bambooLight;
+      ctx.fillRect(slipX, slipY, slipW, slipH);
+      ctx.fillStyle = C.bambooDark;
+      ctx.fillRect(slipX, slipY, slipW, 4);
+      ctx.fillRect(slipX, slipY + slipH - 4, slipW, 4);
+      // segment dividers
+      for (let s = 1; s < 4; s++) {
+        ctx.fillStyle = C.brown;
+        ctx.fillRect(slipX, slipY + s * (slipH / 4), slipW, 2);
+      }
+      // hanja title (vertical-ish — render character-by-character down)
+      ctx.font = "bold 18px 'Noto Serif KR', serif";
+      ctx.fillStyle = C.ink;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const hanja = def.title.split(" — ")[1] || def.title;
+      for (let k = 0; k < hanja.length; k++) {
+        ctx.fillText(hanja[k], slipX + slipW / 2, slipY + 24 + k * 22);
+      }
+      // vermilion seal at bottom
+      ctx.fillStyle = C.vermilion;
+      ctx.fillRect(slipX + slipW / 2 - 12, slipY + slipH - 28, 24, 24);
+      ctx.fillStyle = C.parchment;
+      ctx.font = "bold 12px 'Noto Serif KR', serif";
+      ctx.fillText(pickSlipSeal(def.id), slipX + slipW / 2, slipY + slipH - 16);
+      i++;
+    }
+
+    // Lessons panel on right
+    const lx = panelX + 32 + 3 * 92 + 16;
+    const ly = panelY + 80;
+    ctx.fillStyle = C.parchmentDker;
+    ctx.fillRect(lx, ly, panelW - (lx - panelX) - 32, 240);
+    ctx.fillStyle = C.ink;
+    ctx.font = "bold 16px 'Nanum Gothic', sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("배운 것", lx + 14, ly + 12);
+    ctx.fillStyle = C.vermilion;
+    ctx.fillRect(lx + 14, ly + 36, 50, 2);
+
+    let yy = ly + 50;
+    ctx.font = "13px 'Nanum Gothic', sans-serif";
+    for (const def of JUKGAN_DEFS) {
+      if (!game.collected.has(def.id)) continue;
+      ctx.fillStyle = C.vermilion;
+      ctx.fillText(def.title, lx + 14, yy);
+      yy += 18;
+      ctx.fillStyle = C.ink;
+      const lessonLines = wrapTextLines(def.lesson, panelW - (lx - panelX) - 60, "13px 'Nanum Gothic', sans-serif");
+      for (const ln of lessonLines) {
+        ctx.fillText(ln, lx + 14, yy);
+        yy += 17;
+      }
+      yy += 10;
+    }
+  }
+
+  // Footer hint
+  ctx.font = "12px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.textAlign = "center";
+  ctx.fillText("[Tab / Esc] 닫기", W / 2, H - 36);
+}
+
+function pickSlipSeal(id) {
+  if (id === "hyeongga") return "荊";
+  if (id === "hangu")    return "項";
+  if (id === "yubang")   return "劉";
+  return "印";
+}
+
+function wrapTextLines(text, maxW, font) {
+  ctx.font = font;
+  const lines = [];
+  let line = "";
+  for (let i = 0; i < text.length; i++) {
+    const test = line + text[i];
+    if (ctx.measureText(test).width > maxW && line.length > 0) {
+      lines.push(line);
+      line = text[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line.length) lines.push(line);
+  return lines;
+}
+
+function renderGlossary() {
+  // Backdrop
+  ctx.fillStyle = "rgba(31,26,20,0.6)";
+  ctx.fillRect(0, 0, W, H);
+
+  const panelX = 100, panelY = 60, panelW = W - 200, panelH = H - 120;
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(panelX, panelY, panelW, panelH);
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(panelX, panelY, panelW, 3);
+  ctx.fillRect(panelX, panelY + panelH - 3, panelW, 3);
+  ctx.fillRect(panelX, panelY, 3, panelH);
+  ctx.fillRect(panelX + panelW - 3, panelY, 3, panelH);
+
+  ctx.font = "bold 24px 'Noto Serif KR', serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("四字成語 — 사자성어 도감", panelX + 24, panelY + 18);
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(panelX + 24, panelY + 50, 140, 3);
+
+  let yy = panelY + 80;
+  for (const def of JUKGAN_DEFS) {
+    const unlocked = game.collected.has(def.id);
+    ctx.font = "bold 22px 'Noto Serif KR', serif";
+    ctx.fillStyle = unlocked ? C.ink : C.parchmentDker;
+    ctx.fillText(unlocked ? def.title : "잠긴 사자성어", panelX + 32, yy);
+    ctx.font = "14px 'Nanum Gothic', sans-serif";
+    ctx.fillStyle = unlocked ? C.inkSoft : C.parchmentDker;
+    ctx.fillText(unlocked ? def.lesson : "이 인물의 이야기를 듣고 죽간을 모으면 풀려요.", panelX + 32, yy + 30);
+    yy += 80;
+  }
+
+  ctx.font = "12px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.textAlign = "center";
+  ctx.fillText("[G / Esc] 닫기", W / 2, H - 36);
+}
+
+function renderTitle() {
+  // Parchment background — NOT black, NOT rainbow
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle hanji texture: faint stipples
+  ctx.fillStyle = C.parchmentDker;
+  for (let i = 0; i < 200; i++) {
+    const sx = (i * 53 + 17) % W;
+    const sy = (i * 91 + 7) % H;
+    ctx.globalAlpha = 0.15;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // Falling ink particles
+  for (const p of game.inkParticles) {
+    ctx.fillStyle = C.ink;
+    ctx.globalAlpha = p.alpha;
+    ctx.fillRect(p.x | 0, p.y | 0, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+
+  // Brushed 史記 mega-glyphs (drawn programmatically with thick rects, no rainbow)
+  drawBrushSign("史", 220, 140, 160);
+  drawBrushSign("記", 540, 140, 160);
+
+  // Korean subtitle band
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(W / 2 - 200, 320, 400, 4);
+  ctx.font = "bold 32px 'Nanum Gothic', 'Noto Serif KR', sans-serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("시기열전", W / 2, 360);
+  ctx.font = "14px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.fillText("사마천의 발자취 — 죽간을 모으는 어린 사관 이야기", W / 2, 388);
+
+  // Menu — left-aligned (editorial asymmetry)
+  const menuX = W / 2 - 80, menuY = 430;
+  const items = ["시작하기", "처음부터 다시"];
+  ctx.font = "bold 20px 'Nanum Gothic', sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < items.length; i++) {
+    const y = menuY + i * 32;
+    if (i === game.titleIdx) {
+      // vermilion brush mark
+      ctx.fillStyle = C.vermilion;
+      ctx.fillRect(menuX - 24, y - 4, 16, 8);
+      ctx.fillStyle = C.ink;
+    } else {
+      ctx.fillStyle = C.inkSoft;
+    }
+    ctx.fillText(items[i], menuX, y);
+  }
+
+  // bottom hint
+  ctx.font = "12px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.textAlign = "center";
+  ctx.fillText("↑↓ 선택  ·  Space/Enter 확인", W / 2, H - 28);
+}
+
+// Draw the brush-style hanja for the title in pixel-fillRect strokes (no font dependency for the visual hook)
+function drawBrushSign(ch, cx, cy, size) {
+  // We draw a stylized "stamped" panel + the actual character using the loaded font as fallback,
+  // BUT with a chunky brush-style background panel that gives it the brush-painted look.
+  // Background brush-stroke shape
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(cx - size / 2 + 8, cy - size / 2, size - 16, size);
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(cx - size / 2 + 12, cy - size / 2 + 4, size - 24, size - 8);
+
+  // Vermilion seal in the corner
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(cx + size / 2 - 28, cy + size / 2 - 28, 24, 24);
+  ctx.fillStyle = C.parchment;
+  ctx.font = "bold 14px 'Noto Serif KR', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("印", cx + size / 2 - 16, cy + size / 2 - 16);
+
+  // The character itself
+  ctx.fillStyle = C.ink;
+  ctx.font = `bold ${size - 40}px 'Noto Serif KR', serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(ch, cx, cy);
+}
+
+function renderChapterCard() {
+  // Twilight ambient backdrop, then ink-wash brushed panel
+  ctx.fillStyle = "#2a221a";
+  ctx.fillRect(0, 0, W, H);
+
+  // Brush stroke band
+  const t = 1 - Math.max(0, Math.min(1, game.cardTimer / game.cardDuration));
+  // Reveal width grows with t
+  const bandY = H / 2 - 140, bandH = 280;
+  const bandW = Math.min(W - 80, t * (W - 80) * 1.8);
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect((W - bandW) / 2, bandY, bandW, bandH);
+  // ink edges
+  ctx.fillStyle = C.ink;
+  ctx.fillRect((W - bandW) / 2, bandY, bandW, 3);
+  ctx.fillRect((W - bandW) / 2, bandY + bandH - 3, bandW, 3);
+
+  // Vertical hanja title
+  ctx.font = "bold 56px 'Noto Serif KR', serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const hanja = game.cardText.hanja;
+  const cx = W / 2;
+  const startY = bandY + 40;
+  for (let i = 0; i < hanja.length; i++) {
+    ctx.fillText(hanja[i], cx, startY + i * 50);
+  }
+
+  // Vermilion accent under title
+  ctx.fillStyle = C.vermilion;
+  ctx.fillRect(cx - 60, startY + hanja.length * 50 + 10, 120, 4);
+
+  // Korean subtitle
+  ctx.font = "bold 24px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.ink;
+  ctx.fillText(game.cardText.korean, cx, bandY + bandH - 60);
+  ctx.font = "14px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.fillText(game.cardText.subtitle, cx, bandY + bandH - 32);
+
+  // Hint
+  ctx.font = "12px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.parchmentDker;
+  ctx.fillText("[Space] 계속", cx, H - 40);
+}
+
+function renderTransition() {
+  // Ink wipe sweeping left → right (out) then right → left (in)
+  let p = game.transTimer / game.transDuration;
+  let x;
+  if (game.transPhase === "out") {
+    x = (p * 2) * W; // 0 → W in first half
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(0, 0, x, H);
+  } else {
+    x = ((p - 0.5) * 2) * W; // 0 → W in second half
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(x, 0, W - x, H);
+  }
+}
+
+function renderToast() {
+  if (game.toastTimer <= 0 || !game.toast) return;
+  const a = Math.min(1, game.toastTimer / 600);
+  ctx.font = "bold 16px 'Nanum Gothic', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const tw = ctx.measureText(game.toast).width;
+  const bx = W / 2 - tw / 2 - 18, by = 64, bw = tw + 36, bh = 36;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(bx, by, bw, 3);
+  ctx.fillRect(bx, by + bh - 3, bw, 3);
+  ctx.fillStyle = C.parchment;
+  ctx.fillText(game.toast, W / 2, by + bh / 2);
+  ctx.globalAlpha = 1;
+}
+
+function renderBoot() {
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = C.ink;
+  ctx.font = "bold 20px 'Nanum Gothic', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("먹을 갈고 있어요…", W / 2, H / 2);
+  // Brush stroke animation
+  const p = 1 - game.bootTimer / 1100;
+  ctx.fillRect(W / 2 - 120, H / 2 + 24, 240 * p, 4);
+}
+
+function renderWin() {
+  // Parchment fill
+  ctx.fillStyle = C.parchment;
+  ctx.fillRect(0, 0, W, H);
+  // ink stipple
+  ctx.fillStyle = C.parchmentDker;
+  for (let i = 0; i < 150; i++) {
+    const sx = (i * 71) % W, sy = (i * 113) % H;
+    ctx.globalAlpha = 0.18;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.font = "bold 36px 'Noto Serif KR', serif";
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("史記列傳을 마쳤습니다", W / 2, 80);
+  ctx.font = "16px 'Nanum Gothic', sans-serif";
+  ctx.fillStyle = C.inkSoft;
+  ctx.fillText("어린 사관, 너의 죽간이 사기에 적혔다.", W / 2, 116);
+
+  // Three slips reveal
+  const total = JUKGAN_DEFS.length;
+  for (let i = 0; i < total; i++) {
+    const def = JUKGAN_DEFS[i];
+    const slipReveal = Math.max(0, Math.min(1, (game.winProgress - i * 0.18) * 2));
+    if (slipReveal <= 0) continue;
+    const slipX = W / 2 - (total * 130) / 2 + i * 130 + 10;
+    const slipY = 160;
+    const slipW = 110, slipH = 220 * slipReveal;
+    ctx.fillStyle = C.bambooLight;
+    ctx.fillRect(slipX, slipY, slipW, slipH);
+    ctx.fillStyle = C.bambooDark;
+    ctx.fillRect(slipX, slipY, slipW, 4);
+    if (slipReveal >= 0.95) {
+      ctx.font = "bold 22px 'Noto Serif KR', serif";
+      ctx.fillStyle = C.ink;
+      const hanja = def.title.split(" — ")[1] || def.title;
+      for (let k = 0; k < hanja.length; k++) {
+        ctx.fillText(hanja[k], slipX + slipW / 2, slipY + 28 + k * 26);
+      }
+      ctx.fillStyle = C.vermilion;
+      ctx.fillRect(slipX + slipW / 2 - 14, slipY + slipH - 30, 28, 24);
+      ctx.fillStyle = C.parchment;
+      ctx.font = "bold 14px 'Noto Serif KR', serif";
+      ctx.fillText(pickSlipSeal(def.id), slipX + slipW / 2, slipY + slipH - 18);
+    }
+  }
+
+  // Lessons learned
+  if (game.winProgress > 0.7) {
+    const yStart = 410;
+    ctx.font = "13px 'Nanum Gothic', sans-serif";
+    ctx.textAlign = "center";
+    let yy = yStart;
+    for (const def of JUKGAN_DEFS) {
+      ctx.fillStyle = C.vermilion;
+      ctx.fillText(def.title, W / 2, yy);
+      ctx.fillStyle = C.ink;
+      ctx.fillText(def.lesson, W / 2, yy + 16);
+      yy += 38;
+    }
+  }
+
+  if (game.winProgress >= 1) {
+    const blink = (Math.floor(game.t / 400) % 2) === 0;
+    if (blink) {
+      ctx.font = "bold 14px 'Nanum Gothic', sans-serif";
+      ctx.fillStyle = C.ink;
+      ctx.textAlign = "center";
+      ctx.fillText("[Space] 처음 화면으로", W / 2, H - 24);
+    }
+  }
+}
+
+// ============================================================
+// ===== MAIN LOOP =============================================
+// ============================================================
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min(48, now - lastTime); // clamp big jumps
+  lastTime = now;
+
+  try {
+    update(dt);
+
+    // Render based on state
+    if (game.bootTimer > 0) {
+      renderBoot();
+    } else if (game.state === STATE.TITLE) {
+      renderTitle();
+    } else if (game.state === STATE.WIN) {
+      renderWin();
+    } else if (game.state === STATE.CHAPTER_CARD) {
+      // Render scene underneath, then card overlay
+      renderScene();
+      renderHUD();
+      renderChapterCard();
+    } else if (game.state === STATE.TRANSITION) {
+      renderScene();
+      renderHUD();
+      renderTransition();
+    } else {
+      renderScene();
+      renderHUD();
+      if (game.state === STATE.DIALOGUE) renderDialogue();
+      if (game.state === STATE.INVENTORY) renderInventory();
+      if (game.state === STATE.GLOSSARY)  renderGlossary();
+    }
+
+    renderToast();
+  } catch (err) {
+    // Avoid crashing the loop. Surface error nicely.
+    console.error(err);
+    ctx.fillStyle = C.parchment;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = C.vermilion;
+    ctx.font = "bold 18px 'Nanum Gothic', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("이런! 잠시 멈췄어요. F5로 다시 시작해 주세요.", W / 2, H / 2);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+// ===== BOOT ==================================================
+// ============================================================
+function fitCanvas() {
+  // Maintain 16:9, scale to viewport while preserving pixel-art crispness
+  const ratio = W / H;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let cw, ch;
+  if (vw / vh > ratio) {
+    ch = vh;
+    cw = Math.floor(ch * ratio);
+  } else {
+    cw = vw;
+    ch = Math.floor(cw / ratio);
+  }
+  canvas.style.width = cw + "px";
+  canvas.style.height = ch + "px";
+}
+window.addEventListener("resize", fitCanvas);
+fitCanvas();
+
+// Initialize hub but stay on title screen
+loadInto("hub");
+game.state = STATE.TITLE;
+
+// Audio context must be unlocked by a user gesture
+window.addEventListener("keydown", ensureAudio, { once: true });
+window.addEventListener("click",   ensureAudio, { once: true });
+window.addEventListener("click", () => { canvas.focus && canvas.focus(); });
+
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>

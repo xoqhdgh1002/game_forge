@@ -1,0 +1,25 @@
+# 시크릿 / 환경 변수
+bridge.env
+*.env
+.env*
+
+# 런타임 상태
+bot.lock
+offset.txt
+*.log
+*.log.*
+
+# 생성된 게임 출력물
+output/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# Wrangler / Cloudflare
+.wrangler/
+
+# 세션 / 임시
+session.txt
+first_run.done

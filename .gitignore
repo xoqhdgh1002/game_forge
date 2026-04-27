@@ -23,3 +23,4 @@ __pycache__/
 # 세션 / 임시
 session.txt
 first_run.done
+gan-harness/
